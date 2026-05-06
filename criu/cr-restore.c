@@ -2567,7 +2567,6 @@ static long restorer_get_vma_hint(struct list_head *tgt_vma_list, struct list_he
 			}
 
 			s_vma = vma_next(s_vma);
-			continue;
 		}
 
 		if (prev_vma_end + vma_len > t_vma->e->start) {
@@ -2588,7 +2587,6 @@ static long restorer_get_vma_hint(struct list_head *tgt_vma_list, struct list_he
 			}
 
 			t_vma = vma_next(t_vma);
-			continue;
 		}
 
 		return prev_vma_end;
