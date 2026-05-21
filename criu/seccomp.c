@@ -5,6 +5,7 @@
 #include <ptrace.h>
 
 #include "common/config.h"
+#include "cr_options.h"
 #include "imgset.h"
 #include "kcmp.h"
 #include "pstree.h"
@@ -120,7 +121,7 @@ int seccomp_dump_thread(pid_t tid_real, ThreadCoreEntry *thread_core)
 		thread_core->has_seccomp_mode = true;
 		thread_core->seccomp_mode = entry->mode;
 
-		if (entry->mode == SECCOMP_MODE_FILTER) {
+		if (entry->mode == SECCOMP_MODE_FILTER && entry->nr_chains > 0) {
 			thread_core->has_seccomp_filter = true;
 			thread_core->seccomp_filter = entry->img_filter_pos;
 		}
@@ -145,10 +146,16 @@ static int collect_filter(struct seccomp_entry *entry)
 		if (len < 0) {
 			if (errno == ENOENT) {
 				break;
-			} else {
-				pr_perror("Can't fetch filter on tid_real %d i %zu", entry->tid_real, i);
-				return -1;
 			}
+			if (opts.unprivileged && (errno == EPERM || errno == EACCES) && i == 0 &&
+			    !entry->nr_chains) {
+				pr_warn("Can't fetch seccomp filter on tid_real %d: "
+					"skipping BPF dump in unprivileged mode\n",
+					entry->tid_real);
+				return 0;
+			}
+			pr_perror("Can't fetch filter on tid_real %d i %zu", entry->tid_real, i);
+			return -1;
 		}
 
 		if (meta) {
@@ -157,6 +164,8 @@ static int collect_filter(struct seccomp_entry *entry)
 			if (ptrace(PTRACE_SECCOMP_GET_METADATA, entry->tid_real, sizeof(*meta), meta) < 0) {
 				if (errno == EIO) {
 					/* Old kernel, no METADATA support */
+					meta = NULL;
+				} else if (opts.unprivileged && (errno == EPERM || errno == EACCES)) {
 					meta = NULL;
 				} else {
 					pr_perror("Can't fetch seccomp metadata on tid_real %d pos %zu",
@@ -431,6 +440,19 @@ int seccomp_prepare_threads(struct pstree_item *item, struct task_restore_args *
 
 		if (args->seccomp_mode != SECCOMP_MODE_FILTER)
 			continue;
+
+		if (!seccomp_img_entry || !seccomp_img_entry->n_seccomp_filters ||
+		    !thread_core->has_seccomp_filter) {
+			if (opts.unprivileged) {
+				pr_warn("Filter mode on tid %d but no BPF in image, "
+					"skipping seccomp restore in unprivileged mode\n",
+					item->threads[i].ns[0].virt);
+				args->seccomp_mode = SECCOMP_MODE_DISABLED;
+				continue;
+			}
+			pr_err("Filter mode on tid %d but no BPF in image\n", item->threads[i].ns[0].virt);
+			return -1;
+		}
 
 		if (thread_core->seccomp_filter >= seccomp_img_entry->n_seccomp_filters) {
 			pr_err("Corrupted filter index on tid %d (%u > %zu)\n", item->threads[i].ns[0].virt,
