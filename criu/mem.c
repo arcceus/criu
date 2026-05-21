@@ -328,6 +328,15 @@ prep_dump_pages_args(struct parasite_ctl *ctl, struct vm_area_list *vma_area_lis
 	return args;
 }
 
+static bool mem_read_externally(bool pre_dump)
+{
+	if (opts.seccomp_suspend_failed)
+		return true;
+	if (pre_dump && opts.pre_dump_mode == PRE_DUMP_READ)
+		return true;
+	return false;
+}
+
 static int drain_pages(struct page_pipe *pp, struct parasite_ctl *ctl, struct parasite_dump_pages_args *args)
 {
 	struct page_pipe_buf *ppb;
@@ -359,7 +368,7 @@ static int drain_pages(struct page_pipe *pp, struct parasite_ctl *ctl, struct pa
 	return 0;
 }
 
-static int xfer_pages(struct page_pipe *pp, struct page_xfer *xfer)
+static int xfer_pages(struct page_pipe *pp, struct page_xfer *xfer, int pid, bool external_read)
 {
 	int ret;
 
@@ -368,7 +377,10 @@ static int xfer_pages(struct page_pipe *pp, struct page_xfer *xfer)
 	 *           pre-dump action (see pre_dump_one_task)
 	 */
 	timing_start(TIME_MEMWRITE);
-	ret = page_xfer_dump_pages(xfer, pp);
+	if (external_read)
+		ret = page_xfer_predump_pages(pid, xfer, pp);
+	else
+		ret = page_xfer_dump_pages(xfer, pp);
 	timing_stop(TIME_MEMWRITE);
 
 	return ret;
@@ -483,7 +495,7 @@ static int generate_vma_iovs(struct pstree_item *item, struct vma_area *vma, str
 	 */
 
 	if (!(vma->e->prot & PROT_READ)) {
-		if (opts.pre_dump_mode == PRE_DUMP_READ && pre_dump)
+		if (mem_read_externally(pre_dump))
 			return 0;
 		if ((parent_predump_mode == PRE_DUMP_READ && opts.pre_dump_mode == PRE_DUMP_SPLICE) || !pre_dump)
 			has_parent = false;
@@ -513,9 +525,12 @@ again:
 	if (ret == -EAGAIN) {
 		BUG_ON(!(pp->flags & PP_CHUNK_MODE));
 
-		ret = drain_pages(pp, ctl, args);
+		if (mem_read_externally(pre_dump))
+			ret = 0;
+		else
+			ret = drain_pages(pp, ctl, args);
 		if (!ret)
-			ret = xfer_pages(pp, xfer);
+			ret = xfer_pages(pp, xfer, item->pid->real, mem_read_externally(pre_dump));
 		if (!ret) {
 			page_pipe_reinit(pp);
 			goto again;
@@ -542,6 +557,8 @@ static int __parasite_dump_pages_seized(struct pstree_item *item, struct parasit
 
 	pr_info("\n");
 	pr_info("Dumping pages (type: %d pid: %d)\n", CR_FD_PAGES, item->pid->real);
+	if (mem_read_externally(mdc->pre_dump))
+		pr_info("Using process_vm_readv for page memory (seccomp not suspended)\n");
 	pr_info("----------------------------------------\n");
 
 	timing_start(TIME_MEMDUMP);
@@ -620,13 +637,13 @@ static int __parasite_dump_pages_seized(struct pstree_item *item, struct parasit
 	 * actual optimization which reduces time for which process was frozen
 	 * during pre-dump.
 	 */
-	if (mdc->pre_dump && opts.pre_dump_mode == PRE_DUMP_READ)
+	if (mem_read_externally(mdc->pre_dump))
 		ret = 0;
 	else
 		ret = drain_pages(pp, ctl, args);
 
 	if (!ret && !mdc->pre_dump)
-		ret = xfer_pages(pp, &xfer);
+		ret = xfer_pages(pp, &xfer, item->pid->real, mem_read_externally(mdc->pre_dump));
 	if (ret)
 		goto out_xfer;
 
@@ -702,7 +719,12 @@ int parasite_dump_pages_seized(struct pstree_item *item, struct vm_area_list *vm
 	 *    data from M
 	 */
 
-	if (!mdc->pre_dump || opts.pre_dump_mode == PRE_DUMP_SPLICE) {
+	/*
+	 * READ pre-dump skips mprotect; seccomp-fallback full dump still needs
+	 * PROT_READ for process_vm_readv on non-readable mappings.
+	 */
+	if (!mem_read_externally(mdc->pre_dump) ||
+	    (opts.seccomp_suspend_failed && !mdc->pre_dump)) {
 		pargs->add_prot = PROT_READ;
 		ret = compel_rpc_call_sync(PARASITE_CMD_MPROTECT_VMAS, ctl);
 		if (ret) {
@@ -723,7 +745,8 @@ int parasite_dump_pages_seized(struct pstree_item *item, struct vm_area_list *vm
 		return ret;
 	}
 
-	if (!mdc->pre_dump || opts.pre_dump_mode == PRE_DUMP_SPLICE) {
+	if (!mem_read_externally(mdc->pre_dump) ||
+	    (opts.seccomp_suspend_failed && !mdc->pre_dump)) {
 		pargs->add_prot = 0;
 		if (compel_rpc_call_sync(PARASITE_CMD_MPROTECT_VMAS, ctl)) {
 			pr_err("Can't rollback unprotected vmas with parasite\n");
