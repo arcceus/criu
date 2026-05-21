@@ -46,6 +46,7 @@
 #include "external.h"
 #include "fdstore.h"
 #include "netfilter.h"
+#include "netns-helper.h"
 
 #include "protobuf.h"
 #include "images/netdev.pb-c.h"
@@ -1248,6 +1249,23 @@ static int kerndat_newifindex_err_cb(int err, struct ns_id *ns, void *arg)
 		break;
 	case -ERANGE:
 		kdat.has_newifindex = true;
+		break;
+	case -EPERM:
+	case -EACCES:
+		/*
+		 * The probe uses RTM_SETLINK + IFLA_NEW_IFINDEX on a fake ifname from
+		 * CRIU's current netns. Unprivileged CRIU often gets EPERM here even
+		 * when the running kernel supports IFLA_NEW_IFINDEX and the real
+		 * veth move (via userns_call into the container netns) can succeed.
+		 */
+		if (opts.unprivileged) {
+			kdat.has_newifindex = true;
+			pr_info("IFLA_NEW_IFINDEX probe denied (%s); assuming feature present for restore\n",
+				strerror(-err));
+		} else {
+			kdat.has_newifindex = false;
+			pr_err("Unexpected error: %d(%s)\n", err, strerror(-err));
+		}
 		break;
 	default:
 		pr_err("Unexpected error: %d(%s)\n", err, strerror(-err));
@@ -3632,7 +3650,7 @@ int macvlan_ext_add(struct external *ext)
  * needed other-ns sockets in advance.
  */
 
-static int prep_ns_sockets(struct ns_id *ns, bool for_dump)
+static int prep_ns_sockets_privileged(struct ns_id *ns, bool for_dump)
 {
 	int nsret = -1, ret;
 #ifdef CONFIG_HAS_SELINUX
@@ -3739,6 +3757,46 @@ err_sq:
 		close(ns->net.nlsk);
 err_nl:
 	goto out;
+}
+
+static int prep_ns_sockets(struct ns_id *ns, bool for_dump)
+{
+	struct netns_helper_req req;
+	struct netns_helper_resp resp;
+	int target_fd;
+
+	if (ns->type != NS_CRIU && netns_helper_needed()) {
+		bool close_target;
+
+		pr_info("Using netns helper for %d's net (collecting sockets)\n", ns->ns_pid);
+
+		memset(&req, 0, sizeof(req));
+		req.ns_pid = ns->ns_pid;
+		req.for_dump = for_dump;
+		req.root_pid = root_item->pid->real;
+
+		target_fd = -1;
+		if (netns_helper_open_target(ns, &target_fd))
+			return -1;
+
+		req.ns_fd = target_fd;
+		close_target = !ns->ext_key;
+
+		if (netns_helper_prep(&req, &resp) < 0) {
+			if (close_target && target_fd >= 0)
+				close(target_fd);
+			return -1;
+		}
+
+		if (close_target && target_fd >= 0)
+			close(target_fd);
+
+		ns->net.nlsk = resp.nlsk;
+		ns->net.seqsk = resp.seqsk;
+		return 0;
+	}
+
+	return prep_ns_sockets_privileged(ns, for_dump);
 }
 
 static int netns_nr;
