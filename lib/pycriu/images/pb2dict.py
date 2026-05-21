@@ -350,7 +350,10 @@ def pb2dict(pb, pretty=False, is_hex=False):
     """
     d = collections.OrderedDict() if pretty else {}
     for field, value in pb.ListFields():
-        if _is_repeated(field):
+        is_repeated = getattr(field, 'is_repeated', None)
+        if is_repeated is None:
+            is_repeated = field.label == FD.LABEL_REPEATED
+        if is_repeated:
             d_val = []
             if pretty and _marked_as_ip(field):
                 if len(value) == 1:
