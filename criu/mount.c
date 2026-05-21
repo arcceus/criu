@@ -535,13 +535,36 @@ static int try_resolve_ext_mount(struct mount_info *info)
 
 static struct mount_info *find_fsroot_mount_for(struct mount_info *bm)
 {
-	struct mount_info *sm;
+	struct mount_info *sm, *p;
 
 	list_for_each_entry(sm, &bm->mnt_bind, mnt_bind)
 		if (fsroot_mounted(sm) || (sm->parent == root_yard_mp && strstartswith(bm->root, sm->root)))
 			return sm;
 
+	/*
+	 * Rootless OCI runtimes (e.g. crun) bind individual devtmpfs nodes
+	 * (/dev/urandom, /dev/null, …) from the same host superblock (0:7).
+	 * search_bindmounts() groups them by s_dev only, so the mnt_bind list
+	 * does not contain a mount with root "/". The real FS root is the
+	 * parent (e.g. tmpfs on /dev with root "/", or proc with root "/").
+	 */
+	for (p = bm->parent; p && p != root_yard_mp; p = p->parent) {
+		if (fsroot_mounted(p))
+			return p;
+		if (p->parent == root_yard_mp && strstartswith(bm->root, p->root))
+			return p;
+	}
+
 	return NULL;
+}
+
+static bool devtmpfs_per_device_mount(struct mount_info *mi)
+{
+	if (mi->fstype->code != FSTYPE__DEVTMPFS || !mi->root)
+		return false;
+
+	/* Per-device devtmpfs (e.g. root /null on /dev/null), not the fs root. */
+	return mi->root[0] == '/' && mi->root[1] != '\0';
 }
 
 static bool mnt_needs_remap(struct mount_info *m)
@@ -1662,16 +1685,15 @@ char *get_plain_mountpoint(int mnt_id, char *name)
 static int dump_one_fs(struct mount_info *mi)
 {
 	struct mount_info *pm = mi;
-	struct mount_info *t;
+	struct mount_info *t, *fsroot;
 	bool first = true;
+	int ret;
 
 	if (mnt_is_root_bind(mi) || mi->need_plugin || mnt_is_external_bind(mi) || !mi->fstype->dump)
 		return 0;
 
 	/* mnt_bind is a cycled list, so list_for_each can't be used here. */
 	for (; &pm->mnt_bind != &mi->mnt_bind || first; pm = list_entry(pm->mnt_bind.next, typeof(*pm), mnt_bind)) {
-		int ret;
-
 		first = false;
 
 		if (!fsroot_mounted(pm))
@@ -1685,6 +1707,26 @@ static int dump_one_fs(struct mount_info *mi)
 
 		pm->dumped = true;
 		list_for_each_entry(t, &pm->mnt_bind, mnt_bind)
+			t->dumped = true;
+		return 0;
+	}
+
+	/*
+	 * Per-device devtmpfs binds (rootless crun) share s_dev but have
+	 * root "/urandom", etc. The FS to dump is the parent (e.g. tmpfs /dev).
+	 */
+	fsroot = find_fsroot_mount_for(mi);
+	if (fsroot) {
+		if (!fsroot->dumped && fsroot->fstype && fsroot->fstype->dump) {
+			ret = fsroot->fstype->dump(fsroot);
+			if (ret == MNT_UNREACHABLE)
+				goto mark_bind_dumped;
+			if (ret < 0)
+				return ret;
+			fsroot->dumped = true;
+		}
+mark_bind_dumped:
+		list_for_each_entry(t, &mi->mnt_bind, mnt_bind)
 			t->dumped = true;
 		return 0;
 	}
@@ -2090,6 +2132,13 @@ skip_parent:
 				continue;
 			if (!issubpath(t->root, mi->root))
 				continue;
+			/*
+			 * Rootless crun uses the same devtmpfs root (e.g. /null)
+			 * for /dev/null and masked proc entries. Do not wire
+			 * those into each other's bind chain.
+			 */
+			if (!fsroot_mounted(mi) && t->parent != mi->parent)
+				continue;
 			pr_debug("\t\tBind private %s(%d)\n", t->ns_mountpoint, t->mnt_id);
 			t->bind = mi;
 			t->s_dev_rt = mi->s_dev_rt;
@@ -2112,11 +2161,76 @@ int fetch_rt_stat(struct mount_info *m, const char *where)
 	return 0;
 }
 
+static char *fixup_unpriv_mnt_options(const char *options)
+{
+	char *copy, *save = NULL, *part, *out;
+	size_t out_cap, out_len;
+	unsigned int id;
+
+	if (!options || !options[0])
+		return NULL;
+
+	if (opts.mode != CR_RESTORE)
+		return xstrdup(options);
+
+	copy = xstrdup(options);
+	if (!copy)
+		return NULL;
+
+	out_cap = strlen(options) + 32;
+	out = xmalloc(out_cap);
+	if (!out)
+		goto err;
+
+	out_len = 0;
+	out[0] = '\0';
+
+	for (part = strtok_r(copy, ",", &save); part; part = strtok_r(NULL, ",", &save)) {
+		char piece[64];
+
+		if (sscanf(part, "gid=%u", &id) == 1 && userns_mnt_opt_needs_fixup(id, true)) {
+			unsigned int fixed = userns_mnt_opt_fixup_gid(id);
+
+			pr_info("devpts/mnt: fixup gid=%u -> gid=%u for mount yard restore\n", id, fixed);
+			id = fixed;
+			snprintf(piece, sizeof(piece), "gid=%u", id);
+			part = piece;
+		} else if (sscanf(part, "uid=%u", &id) == 1 && userns_mnt_opt_needs_fixup(id, false)) {
+			unsigned int fixed = userns_mnt_opt_fixup_uid(id);
+
+			pr_info("mnt: fixup uid=%u -> uid=%u for mount yard restore\n", id, fixed);
+			id = fixed;
+			snprintf(piece, sizeof(piece), "uid=%u", id);
+			part = piece;
+		}
+
+		if (out_len)
+			out[out_len++] = ',';
+		out_len += snprintf(out + out_len, out_cap - out_len, "%s", part);
+	}
+
+	free(copy);
+	return out;
+
+err:
+	free(copy);
+	xfree(out);
+	return NULL;
+}
+
 int do_simple_mount(struct mount_info *mi, const char *src, const char *fstype, unsigned long mountflags)
 {
-	int ret = mount(src, service_mountpoint(mi), fstype, mountflags, mi->options);
+	char *options = fixup_unpriv_mnt_options(mi->options);
+	const char *mount_opts = options ? options : mi->options;
+	int ret;
+
+	if (mi->fstype->code == FSTYPE__DEVPTS && mount_opts)
+		pr_info("devpts: mounting %s with options \"%s\"\n", service_mountpoint(mi), mount_opts);
+
+	ret = mount(src, service_mountpoint(mi), fstype, mountflags, mount_opts);
 	if (ret)
 		pr_perror("Unable to mount %s %s (id=%d)", src, service_mountpoint(mi), mi->mnt_id);
+	xfree(options);
 	return ret;
 }
 
@@ -2156,6 +2270,29 @@ int apply_sb_flags(void *args, int fd, pid_t pid)
 int mount_root(void *args, int fd, pid_t pid)
 {
 	return userns_mount(opts.root, args, fd, pid);
+}
+
+static int do_host_dev_bind_mount(struct mount_info *mi)
+{
+	unsigned long mflags = mi->flags & (~MS_PROPAGATE);
+
+	pr_info("\tBind host %s to %s\n", mi->ns_mountpoint, service_mountpoint(mi));
+
+	if (mount(mi->ns_mountpoint, service_mountpoint(mi), NULL, MS_BIND | (mi->flags & MS_REC), NULL) < 0) {
+		pr_perror("Can't bind host %s at %s", mi->ns_mountpoint, service_mountpoint(mi));
+		return -1;
+	}
+
+	if (mflags && mount(NULL, service_mountpoint(mi), NULL, MS_BIND | MS_REMOUNT | mflags, NULL)) {
+		pr_perror("Can't re-mount at %s", service_mountpoint(mi));
+		return -1;
+	}
+
+	if (restore_shared_options(mi, !mi->shared_id, mi->shared_id, 0))
+		return -1;
+
+	mi->mounted = true;
+	return 0;
 }
 
 static int do_new_mount(struct mount_info *mi)
@@ -2498,6 +2635,8 @@ static bool can_mount_now(struct mount_info *mi)
 	}
 
 	if (!fsroot_mounted(mi) && (mi->bind == NULL && !mi->need_plugin)) {
+		if (devtmpfs_per_device_mount(mi))
+			goto shared;
 		pr_debug("%s: false as %d is non-root without bind or plugin\n", __func__, mi->mnt_id);
 		return false;
 	}
@@ -2664,7 +2803,10 @@ static int do_mount_one(struct mount_info *mi)
 		mi->mounted = true;
 		ret = 0;
 	} else if (!mi->bind && !mi->need_plugin && !mnt_is_nodev_external(mi)) {
-		ret = do_new_mount(mi);
+		if (devtmpfs_per_device_mount(mi) && opts.unprivileged && opts.mode == CR_RESTORE)
+			ret = do_host_dev_bind_mount(mi);
+		else
+			ret = do_new_mount(mi);
 	} else {
 		ret = do_bind_mount(mi);
 	}

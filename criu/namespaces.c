@@ -769,6 +769,57 @@ int dump_task_ns_ids(struct pstree_item *item)
 static UsernsEntry userns_entry = USERNS_ENTRY__INIT;
 #define INVALID_ID (~0U)
 
+static bool id_in_subordinate_map(unsigned int id, UidGidExtent **map, int n)
+{
+	int i;
+
+	for (i = 0; i < n; i++) {
+		if (map[i]->count > 1 && map[i]->lower_first <= id && map[i]->lower_first + map[i]->count > id)
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * Rootless runtimes (crun/podman) pass host subordinate ids in mount
+ * options (e.g. devpts gid=100004). When userns-*.img is missing, maps
+ * are empty but the layout is still usually "1 SUBUID_MIN 65536".
+ */
+static bool subordinate_host_id(unsigned int id)
+{
+	return id >= 65536;
+}
+
+static unsigned int subordinate_host_to_userns_id(unsigned int id, bool is_gid)
+{
+	UsernsEntry *e = &userns_entry;
+	UidGidExtent **map = is_gid ? e->gid_map : e->uid_map;
+	int n = is_gid ? e->n_gid_map : e->n_uid_map;
+	int i;
+
+	for (i = 0; i < n; i++) {
+		UidGidExtent *m = map[i];
+
+		if (m->count > 1 && m->lower_first <= id && m->lower_first + m->count > id)
+			return m->first + (id - m->lower_first);
+	}
+
+	/* Typical rootless map: 1 100000 65536 */
+	if (id >= 100000 && id < 100000 + 65536)
+		return 1 + (id - 100000);
+
+	return id;
+}
+
+static void sync_userns_entry(UsernsEntry *e)
+{
+	userns_entry.n_uid_map = e->n_uid_map;
+	userns_entry.uid_map = e->uid_map;
+	userns_entry.n_gid_map = e->n_gid_map;
+	userns_entry.gid_map = e->gid_map;
+}
+
 static unsigned int userns_id(unsigned int id, UidGidExtent **map, int n)
 {
 	int i;
@@ -821,6 +872,46 @@ gid_t userns_gid(gid_t gid)
 {
 	UsernsEntry *e = &userns_entry;
 	return userns_id(gid, e->gid_map, e->n_gid_map);
+}
+
+bool userns_mnt_opt_needs_fixup(unsigned int id, bool is_gid)
+{
+	UsernsEntry *e = &userns_entry;
+
+	if (is_gid) {
+		if (e->n_gid_map > 0 && id_in_subordinate_map(id, e->gid_map, e->n_gid_map))
+			return true;
+	} else if (e->n_uid_map > 0 && id_in_subordinate_map(id, e->uid_map, e->n_uid_map)) {
+		return true;
+	}
+
+	return subordinate_host_id(id);
+}
+
+gid_t userns_mnt_opt_fixup_gid(gid_t gid)
+{
+	gid_t u;
+
+	if (subordinate_host_id(gid))
+		return subordinate_host_to_userns_id(gid, true);
+
+	u = userns_gid(gid);
+	if (u != INVALID_ID)
+		return u;
+	return gid;
+}
+
+uid_t userns_mnt_opt_fixup_uid(uid_t uid)
+{
+	uid_t u;
+
+	if (subordinate_host_id(uid))
+		return subordinate_host_to_userns_id(uid, false);
+
+	u = userns_uid(uid);
+	if (u != INVALID_ID)
+		return u;
+	return uid;
 }
 
 static int parse_id_map(pid_t pid, char *name, UidGidExtent ***pb_exts)
@@ -1599,12 +1690,15 @@ static int read_user_ns_img(void)
 	img = open_image(CR_FD_USERNS, O_RSTR, root_item->ids->user_ns_id);
 	if (!img)
 		return -1;
-	ret = pb_read_one(img, &ns->user.e, PB_USERNS);
+	ret = pb_read_one_eof(img, &ns->user.e, PB_USERNS);
 	close_image(img);
 	if (ret < 0) {
 		pr_err("Can not read userns object\n");
 		return -1;
 	}
+
+	if (ns->user.e)
+		sync_userns_entry(ns->user.e);
 
 	return 0;
 }

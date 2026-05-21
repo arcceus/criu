@@ -189,6 +189,9 @@ extern int stop_usernsd(void);
 
 extern uid_t userns_uid(uid_t uid);
 extern gid_t userns_gid(gid_t gid);
+extern bool userns_mnt_opt_needs_fixup(unsigned int id, bool is_gid);
+extern uid_t userns_mnt_opt_fixup_uid(uid_t uid);
+extern gid_t userns_mnt_opt_fixup_gid(gid_t gid);
 
 extern int dump_user_ns(pid_t pid, int ns_id);
 extern void free_userns_data(void);
