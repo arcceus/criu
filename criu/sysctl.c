@@ -7,6 +7,7 @@
 #include <sys/wait.h>
 #include <sched.h>
 
+#include "cr_options.h"
 #include "namespaces.h"
 #include "sysctl.h"
 #include "util.h"
@@ -253,8 +254,17 @@ static int __userns_sysctl_op(void *arg, int proc_fd, pid_t pid)
 
 		fd = openat(dir, req->name, flags);
 		if (fd < 0) {
-			if (errno == ENOENT && (req->flags & CTL_FLAGS_OPTIONAL))
+			if (errno == ENOENT && (req->flags & CTL_FLAGS_OPTIONAL)) {
+				req = (struct sysctl_req *)(((char *)req) + total_len);
 				continue;
+			}
+			if (opts.unprivileged && (errno == EACCES || errno == EPERM) &&
+			    (req->flags & CTL_FLAGS_UNPRIV_SKIP)) {
+				pr_warn("Can't open sysctl %s: %s (skipping in unprivileged mode)\n", req->name,
+					strerror(errno));
+				req = (struct sysctl_req *)(((char *)req) + total_len);
+				continue;
+			}
 			pr_perror("Can't open sysctl %s", req->name);
 			goto out;
 		}
@@ -301,12 +311,14 @@ static int __userns_sysctl_op(void *arg, int proc_fd, pid_t pid)
 		close(nsfd);
 
 		for (i = 0; i < userns_req->nr_req; i++) {
+			if (fds[i] < 0)
+				continue;
 			if (do_sysctl_op(fds[i], reqs[i], op) < 0) {
-				if (op != CTL_READ || errno != EIO || !(req->flags & CTL_FLAGS_READ_EIO_SKIP))
+				if (op != CTL_READ || errno != EIO || !(reqs[i]->flags & CTL_FLAGS_READ_EIO_SKIP))
 					exit(1);
 			} else {
 				/* mark sysctl in question exists */
-				req->flags |= CTL_FLAGS_HAS;
+				reqs[i]->flags |= CTL_FLAGS_HAS;
 			}
 		}
 
@@ -330,9 +342,8 @@ static int __userns_sysctl_op(void *arg, int proc_fd, pid_t pid)
 out:
 	if (fds) {
 		for (i = 0; i < userns_req->nr_req; i++) {
-			if (fds[i] < 0)
-				break;
-			close_safe(&fds[i]);
+			if (fds[i] >= 0)
+				close_safe(&fds[i]);
 		}
 
 		xfree(fds);

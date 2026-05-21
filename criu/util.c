@@ -1523,7 +1523,14 @@ void rlimit_unlimit_nofile(void)
 {
 	struct rlimit new;
 
-	if (opts.unprivileged && !has_cap_sys_resource(opts.cap_eff))
+	/*
+	 * In unprivileged mode we cannot reliably raise RLIMIT_NOFILE to
+	 * fs.nr_open: CAP_SYS_RESOURCE alone is often not enough (user ns,
+	 * hard max), and prlimit fails with EPERM — which breaks restore when
+	 * runtimes treat CRIU stderr as fatal. init_service_fd() reads the
+	 * current limit via prlimit(GET) instead.
+	 */
+	if (opts.unprivileged)
 		return;
 
 	new.rlim_cur = kdat.sysctl_nr_open;

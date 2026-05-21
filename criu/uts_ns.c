@@ -4,6 +4,7 @@
 #include <string.h>
 #include <sched.h>
 
+#include "cr_options.h"
 #include "util.h"
 #include "namespaces.h"
 #include "sysctl.h"
@@ -60,6 +61,11 @@ int prepare_utsns(int pid)
 	req[0].type = CTL_STR(strlen(ue->nodename));
 	req[1].arg = ue->domainname;
 	req[1].type = CTL_STR(strlen(ue->domainname));
+
+	if (opts.unprivileged) {
+		req[0].flags |= CTL_FLAGS_UNPRIV_SKIP;
+		req[1].flags |= CTL_FLAGS_UNPRIV_SKIP;
+	}
 
 	ret = sysctl_op(req, ARRAY_SIZE(req), CTL_WRITE, CLONE_NEWUTS);
 	utsns_entry__free_unpacked(ue, NULL);

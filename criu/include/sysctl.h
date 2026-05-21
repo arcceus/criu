@@ -38,5 +38,10 @@ enum {
 #define CTL_FLAGS_HAS		  2
 #define CTL_FLAGS_READ_EIO_SKIP	  4
 #define CTL_FLAGS_IPC_EACCES_SKIP 8
+/*
+ * Open of /proc/sys/... may return EACCES/EPERM before setns (e.g. UTS
+ * hostname) when CRIU runs unprivileged; restore can continue without it.
+ */
+#define CTL_FLAGS_UNPRIV_SKIP 16
 
 #endif /* __CR_SYSCTL_H__ */
