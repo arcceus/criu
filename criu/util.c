@@ -2042,8 +2042,12 @@ void util_init(void)
 
 	uuid_generate(uuid);
 	uuid_unparse(uuid, criu_run_id);
-	pr_info("CRIU run id = %s\n", criu_run_id);
 	memcpy(compel_run_id, criu_run_id, sizeof(criu_run_id));
+}
+
+void log_note_run_id(void)
+{
+	pr_info("CRIU run id = %s\n", criu_run_id);
 }
 
 /*

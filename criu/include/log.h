@@ -32,6 +32,7 @@ extern void print_on_level(unsigned int loglevel, const char *format, ...)
 #endif
 
 void flush_early_log_buffer(int fd);
+void log_flush_early_to_stderr(void);
 
 #define print_once(loglevel, fmt, ...)                                \
 	do {                                                          \

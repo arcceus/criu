@@ -2272,6 +2272,29 @@ int mount_root(void *args, int fd, pid_t pid)
 	return userns_mount(opts.root, args, fd, pid);
 }
 
+/*
+ * Apply per-mount flags after a bind mount. Unprivileged restore often
+ * cannot remount bind targets (e.g. /etc/hosts); the bind itself is enough
+ * for mount-yard placeholders — caller manages real mounts post-restore.
+ */
+static int remount_bind_flags(struct mount_info *mi, unsigned long mflags)
+{
+	if (!mflags)
+		return 0;
+
+	if (!mount(NULL, service_mountpoint(mi), NULL, MS_BIND | MS_REMOUNT | mflags, NULL))
+		return 0;
+
+	if (opts.unprivileged && opts.mode == CR_RESTORE && (errno == EPERM || errno == EACCES)) {
+		pr_info("mnt: re-mount EPERM at %s in unprivileged restore, using bind flags\n",
+			service_mountpoint(mi));
+		return 0;
+	}
+
+	pr_perror("Can't re-mount at %s", service_mountpoint(mi));
+	return -1;
+}
+
 static int do_host_dev_bind_mount(struct mount_info *mi)
 {
 	unsigned long mflags = mi->flags & (~MS_PROPAGATE);
@@ -2283,10 +2306,8 @@ static int do_host_dev_bind_mount(struct mount_info *mi)
 		return -1;
 	}
 
-	if (mflags && mount(NULL, service_mountpoint(mi), NULL, MS_BIND | MS_REMOUNT | mflags, NULL)) {
-		pr_perror("Can't re-mount at %s", service_mountpoint(mi));
+	if (remount_bind_flags(mi, mflags))
 		return -1;
-	}
 
 	if (restore_shared_options(mi, !mi->shared_id, mi->shared_id, 0))
 		return -1;
@@ -2342,10 +2363,8 @@ static int do_new_mount(struct mount_info *mi)
 		close(fd);
 	}
 
-	if (mflags && mount(NULL, service_mountpoint(mi), NULL, MS_REMOUNT | MS_BIND | mflags, NULL)) {
-		pr_perror("Unable to apply bind-mount options");
+	if (remount_bind_flags(mi, mflags))
 		return -1;
-	}
 
 	/*
 	 * A slave should be mounted from do_bind_mount().
@@ -2534,10 +2553,8 @@ do_bind:
 
 	mflags = mi->flags & (~MS_PROPAGATE);
 	if (!mi->bind || mflags != (mi->bind->flags & (~MS_PROPAGATE)))
-		if (mount(NULL, service_mountpoint(mi), NULL, MS_BIND | MS_REMOUNT | mflags, NULL)) {
-			pr_perror("Can't re-mount at %s", service_mountpoint(mi));
+		if (remount_bind_flags(mi, mflags))
 			goto err;
-		}
 
 	if (unlikely(mi->deleted)) {
 		if (S_ISDIR(st.st_mode)) {
@@ -2721,10 +2738,8 @@ static int do_mount_root(struct mount_info *mi)
 	if (restore_shared_options(mi, !mi->shared_id && !mi->master_id, mi->shared_id, mi->master_id))
 		return -1;
 
-	if (mflags && mount(NULL, service_mountpoint(mi), NULL, MS_REMOUNT | MS_BIND | mflags, NULL)) {
-		pr_perror("Unable to apply root mount options");
+	if (remount_bind_flags(mi, mflags))
 		return -1;
-	}
 
 	return fetch_rt_stat(mi, service_mountpoint(mi));
 }

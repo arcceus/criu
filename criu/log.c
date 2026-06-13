@@ -174,6 +174,17 @@ struct early_log_hdr {
 	uint16_t len;
 };
 
+void log_flush_early_to_stderr(void)
+{
+	/*
+	 * Only flush if logging was never set up. After log_init() the early
+	 * buffer is empty; avoid writing pre-init messages to stderr when it
+	 * has been reconnected to a container stdio pipe during restore.
+	 */
+	if (!init_done && early_log_buf_off > 0)
+		flush_early_log_buffer(STDERR_FILENO);
+}
+
 void flush_early_log_buffer(int fd)
 {
 	unsigned int pos = 0;

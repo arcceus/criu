@@ -390,6 +390,8 @@ static int setup_logging_from_req(CriuOpts *req, bool output_changed_by_rpc_conf
 		return -1;
 	}
 
+	log_note_run_id();
+
 	return 0;
 }
 

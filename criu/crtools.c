@@ -51,7 +51,7 @@ void flush_early_log_to_stderr(void) __attribute__((destructor));
 
 void flush_early_log_to_stderr(void)
 {
-	flush_early_log_buffer(STDERR_FILENO);
+	log_flush_early_to_stderr();
 }
 
 static int image_dir_mode(void)
@@ -275,6 +275,8 @@ int main(int argc, char *argv[], char *envp[])
 
 	if (log_init(opts.output))
 		return 1;
+
+	log_note_run_id();
 
 	if (kerndat_init()) {
 		pr_err("Could not initialize kernel features detection.\n");
