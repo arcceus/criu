@@ -904,8 +904,21 @@ int collect_user_namespaces(bool for_dump)
 	if (!for_dump)
 		return 0;
 
-	if (!(root_ns_mask & CLONE_NEWUSER))
+	if (opts.rootless_container) {
+		/*
+		 * --rootless-container asserts the target lives inside a
+		 * user namespace. If CRIU and the target share the same
+		 * userns, the flag was misconfigured — abort immediately.
+		 */
+		if (!(root_ns_mask & CLONE_NEWUSER)) {
+			pr_err("--rootless-container requires the target to be in a different user namespace\n");
+			return -1;
+		}
+
+		pr_info("Rootless container mode: dumping userns maps from target\n");
+	} else if (!(root_ns_mask & CLONE_NEWUSER)) {
 		return 0;
+	}
 
 	return walk_namespaces(&user_ns_desc, collect_user_ns, NULL);
 }
@@ -1181,7 +1194,7 @@ int dump_namespaces(struct pstree_item *item, unsigned int ns_flags)
 	return 0;
 }
 
-static int write_id_map(pid_t pid, UidGidExtent **extents, int n, char *id_map)
+static int write_id_map(pid_t pid, UidGidExtent **extents, int n, const char *id_map)
 {
 	char buf[PAGE_SIZE];
 	int off = 0, i;

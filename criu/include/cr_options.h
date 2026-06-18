@@ -294,6 +294,13 @@ struct cr_options {
 	 */
 	int unprivileged;
 	/*
+	 * Set when the target lives inside a user namespace (rootless
+	 * containers). CRIU crosses the userns boundary with a helper
+	 * process for netns and mountns operations. Distinct from
+	 * --unprivileged (CRIU itself runs as non-root).
+	 */
+	int rootless_container;
+	/*
 	 * Set when PTRACE_O_SUSPEND_SECCOMP failed during seize (e.g. rootless
 	 * containers). Page memory is dumped with process_vm_readv instead of
 	 * the parasite vmsplice path.
@@ -303,6 +310,11 @@ struct cr_options {
 
 extern struct cr_options opts;
 extern char *rpc_cfg_file;
+
+static inline bool criu_is_unprivileged_or_rootless(void)
+{
+	return opts.unprivileged || opts.rootless_container;
+}
 
 extern int parse_options(int argc, char **argv, bool *usage_error, bool *has_exec_cmd, int state);
 extern int check_options(void);

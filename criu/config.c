@@ -759,6 +759,7 @@ int parse_options(int argc, char **argv, bool *usage_error, bool *has_exec_cmd, 
 		{ "image-io-mode", required_argument, 0, 1101 },
 		BOOL_OPT("mntns-compat-mode", &opts.mntns_compat_mode),
 		BOOL_OPT("unprivileged", &opts.unprivileged),
+		BOOL_OPT("rootless-container", &opts.rootless_container),
 		BOOL_OPT("ghost-fiemap", &opts.ghost_fiemap),
 		BOOL_OPT(OPT_ALLOW_UPROBES, &opts.allow_uprobes),
 		{ "compress",                no_argument,       0, 'c'  },
@@ -1320,6 +1321,16 @@ int check_options(void)
 
 	if (check_namespace_opts()) {
 		pr_err("Error: namespace flags conflict\n");
+		return 1;
+	}
+
+	if (opts.rootless_container && opts.mode != CR_DUMP && opts.mode != CR_RESTORE) {
+		pr_err("--rootless-container is only valid for dump and restore\n");
+		return 1;
+	}
+
+	if (opts.rootless_container && opts.swrk_restore) {
+		pr_err("--rootless-container is incompatible with swrk restore\n");
 		return 1;
 	}
 
