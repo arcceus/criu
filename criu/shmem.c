@@ -861,7 +861,7 @@ static int dump_one_shmem(struct shmem_info *si)
 			goto errc;
 		}
 	} else {
-		if (errno != EPERM || !opts.unprivileged) {
+		if (errno != EPERM || !(opts.unprivileged || in_noninitial_userns())) {
 			goto err;
 		}
 
@@ -951,8 +951,13 @@ int dump_one_sysv_shmem(void *addr, unsigned long size, unsigned long shmid)
 	}
 
 	fd = open_proc(PROC_SELF, "map_files/%lx-%lx", (unsigned long)addr, (unsigned long)addr + si->size);
-	if (fd < 0)
+	if (fd < 0) {
+		if (errno == EPERM && (opts.unprivileged || in_noninitial_userns())) {
+			pr_debug("Can't open map_files for sysv shmem, dumping from shmat address\n");
+			return do_dump_one_shmem(-1, addr, si);
+		}
 		return -1;
+	}
 
 	ret = do_dump_one_shmem(fd, addr, si);
 	close(fd);
