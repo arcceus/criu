@@ -41,6 +41,7 @@
 #include "imgset.h"
 #include "fs-magic.h"
 #include "fdinfo.h"
+#include "filesystems.h"
 #include "cr_options.h"
 #include "autofs.h"
 #include "parasite.h"
@@ -57,6 +58,8 @@
 #include "images/ext-file.pb-c.h"
 
 #include "plugin.h"
+
+#define DUMP_FD_SKIPPED 1
 
 #define FDESC_HASH_SIZE 64
 static struct hlist_head file_desc_hash[FDESC_HASH_SIZE];
@@ -495,16 +498,28 @@ static int dump_chrdev(struct fd_parms *p, int lfd, FdinfoEntry *e)
 	return err;
 }
 
-static int dump_one_file(struct pid *pid, int fd, int lfd, struct fd_opts *opts, struct parasite_ctl *ctl,
+static int dump_one_file(struct pid *pid, int fd, int lfd, struct fd_opts *fdo, struct parasite_ctl *ctl,
 			 FdinfoEntry *e, struct parasite_drain_fd *dfds)
 {
 	struct fd_parms p = FD_PARMS_INIT;
 	const struct fdtype_ops *ops;
 	struct fd_link link;
+	bool link_filled = false;
 
-	if (fill_fd_params(pid, fd, lfd, opts, &p) < 0) {
+	if (fill_fd_params(pid, fd, lfd, fdo, &p) < 0) {
 		pr_err("Can't get stat on %d\n", fd);
 		return -1;
+	}
+
+	if ((opts.unprivileged || in_noninitial_userns()) &&
+	    (S_ISREG(p.stat.st_mode) || S_ISDIR(p.stat.st_mode) || S_ISLNK(p.stat.st_mode))) {
+		if (fill_fdlink(lfd, &p, &link))
+			return -1;
+		link_filled = true;
+		if (cgroup_is_dump_skipped_path(link.name + 1)) {
+			pr_warn("skip cgroup fd %d path %s in unprivileged userns context\n", fd, link.name + 1);
+			return DUMP_FD_SKIPPED;
+		}
 	}
 
 	if (note_file_lock(pid, fd, lfd, &p))
@@ -563,7 +578,7 @@ static int dump_one_file(struct pid *pid, int fd, int lfd, struct fd_opts *opts,
 	}
 
 	if (S_ISREG(p.stat.st_mode) || S_ISDIR(p.stat.st_mode) || S_ISLNK(p.stat.st_mode)) {
-		if (fill_fdlink(lfd, &p, &link))
+		if (!link_filled && fill_fdlink(lfd, &p, &link))
 			return -1;
 
 		p.link = &link;
@@ -606,11 +621,17 @@ int dump_my_file(int lfd, u32 *id, int *type)
 	struct pid me = {};
 	struct fd_opts fdo = {};
 	FdinfoEntry e = FDINFO_ENTRY__INIT;
+	int ret;
 
 	me.real = getpid();
 	me.ns[0].virt = -1; /* FIXME */
 
-	if (dump_one_file(&me, lfd, lfd, &fdo, NULL, &e, NULL))
+	ret = dump_one_file(&me, lfd, lfd, &fdo, NULL, &e, NULL);
+	if (ret == DUMP_FD_SKIPPED) {
+		pr_err("Unexpected skipped fd while dumping CRIU-owned file\n");
+		return -1;
+	}
+	if (ret)
 		return -1;
 
 	*id = e.id;
@@ -655,6 +676,8 @@ int dump_task_files_seized(struct parasite_ctl *ctl, struct pstree_item *item, s
 			FdinfoEntry e = FDINFO_ENTRY__INIT;
 
 			ret = dump_one_file(item->pid, dfds->fds[i + off], lfds[i], opts + i, ctl, &e, dfds);
+			if (ret == DUMP_FD_SKIPPED)
+				continue; /* cgroup fd skipped; no fdinfo entry */
 			if (ret)
 				break;
 
