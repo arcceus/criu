@@ -13,12 +13,15 @@
 
 #include "common/list.h"
 #include "common/scm.h"
+#include "cr_options.h"
 #include "external.h"
 #include "fdstore.h"
 #include "kerndat.h"
 #include "log.h"
 #include "lsm.h"
 #include "namespaces.h"
+#include "net.h"
+#include "netfilter.h"
 #include "netns-broker.h"
 #include "userns-broker.h"
 #include "util.h"
@@ -230,5 +233,168 @@ child_err:
 	}
 
 	pr_info("Prepared netns sockets via broker for pid %d\n", ns->ns_pid);
+	return 0;
+}
+
+static int broker_enter_userns_netns(int pid, const char *op_name)
+{
+	int netns_fd = -1;
+
+	if (userns_broker_enter(pid, op_name))
+		return -1;
+
+	netns_fd = do_open_proc(pid, O_RDONLY, "ns/net");
+	if (netns_fd < 0) {
+		pr_perror("netns broker %s: open proc %d ns/net", op_name, pid);
+		return -1;
+	}
+
+	if (setns(netns_fd, CLONE_NEWNET)) {
+		pr_perror("netns broker %s: setns netns %d", op_name, pid);
+		close(netns_fd);
+		return -1;
+	}
+
+	close(netns_fd);
+	return 0;
+}
+
+int netns_broker_lock_network(int pid, bool restore)
+{
+	int sk[2], child_pid, status;
+	struct prep_msg msg = {};
+
+	if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sk) < 0) {
+		pr_perror("netns broker lock: socketpair");
+		return -1;
+	}
+
+	child_pid = fork();
+	if (child_pid < 0) {
+		pr_perror("netns broker lock: fork");
+		close(sk[0]);
+		close(sk[1]);
+		return -1;
+	}
+
+	if (child_pid == 0) {
+		close(sk[0]);
+
+		if (broker_enter_userns_netns(pid, "lock"))
+			goto child_err;
+
+		msg.ret = 0;
+		if (opts.network_lock_method == NETWORK_LOCK_NFTABLES)
+			msg.ret = nftables_lock_network_internal(restore);
+		else if (opts.network_lock_method == NETWORK_LOCK_IPTABLES)
+			msg.ret = iptables_network_lock_internal();
+		else
+			msg.ret = -1;
+
+		send_fds(sk[1], NULL, 0, NULL, 0, &msg, sizeof(msg));
+
+		close(sk[1]);
+		_exit(msg.ret ? 1 : 0);
+
+child_err:
+		msg.ret = -1;
+		send_fds(sk[1], NULL, 0, NULL, 0, &msg, sizeof(msg));
+		close(sk[1]);
+		_exit(1);
+	}
+
+	close(sk[1]);
+
+	if (recv_fds(sk[0], NULL, 0, &msg, sizeof(msg)) < 0) {
+		pr_perror("netns broker lock: recv msg");
+		close(sk[0]);
+		waitpid(child_pid, &status, 0);
+		return -1;
+	}
+
+	close(sk[0]);
+
+	if (waitpid(child_pid, &status, 0) < 0) {
+		pr_perror("netns broker lock: waitpid");
+		return -1;
+	}
+
+	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || msg.ret) {
+		pr_err("netns broker lock: child failed (exit %d, ret %d)\n",
+		       WIFEXITED(status) ? WEXITSTATUS(status) : -1, msg.ret);
+		return -1;
+	}
+
+	pr_info("Locked network via broker for pid %d\n", pid);
+	return 0;
+}
+
+int netns_broker_unlock_network(int pid)
+{
+	int sk[2], child_pid, status;
+	struct prep_msg msg = {};
+
+	if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sk) < 0) {
+		pr_perror("netns broker unlock: socketpair");
+		return -1;
+	}
+
+	child_pid = fork();
+	if (child_pid < 0) {
+		pr_perror("netns broker unlock: fork");
+		close(sk[0]);
+		close(sk[1]);
+		return -1;
+	}
+
+	if (child_pid == 0) {
+		close(sk[0]);
+
+		if (broker_enter_userns_netns(pid, "unlock"))
+			goto child_err;
+
+		msg.ret = 0;
+		if (opts.network_lock_method == NETWORK_LOCK_NFTABLES)
+			msg.ret = nftables_network_unlock();
+		else if (opts.network_lock_method == NETWORK_LOCK_IPTABLES)
+			msg.ret = iptables_network_unlock_internal();
+		else
+			msg.ret = -1;
+
+		send_fds(sk[1], NULL, 0, NULL, 0, &msg, sizeof(msg));
+
+		close(sk[1]);
+		_exit(msg.ret ? 1 : 0);
+
+child_err:
+		msg.ret = -1;
+		send_fds(sk[1], NULL, 0, NULL, 0, &msg, sizeof(msg));
+		close(sk[1]);
+		_exit(1);
+	}
+
+	close(sk[1]);
+
+	if (recv_fds(sk[0], NULL, 0, &msg, sizeof(msg)) < 0) {
+		pr_perror("netns broker unlock: recv msg");
+		close(sk[0]);
+		waitpid(child_pid, &status, 0);
+		return -1;
+	}
+
+	close(sk[0]);
+
+	if (waitpid(child_pid, &status, 0) < 0) {
+		pr_perror("netns broker unlock: waitpid");
+		return -1;
+	}
+
+	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || msg.ret) {
+		pr_err("netns broker unlock: child failed (exit %d, ret %d)\n",
+		       WIFEXITED(status) ? WEXITSTATUS(status) : -1, msg.ret);
+		return -1;
+	}
+
+	pr_info("Unlocked network via broker for pid %d\n", pid);
 	return 0;
 }

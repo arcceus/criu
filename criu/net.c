@@ -55,6 +55,8 @@
 #undef LOG_PREFIX
 #define LOG_PREFIX "net: "
 
+static bool netns_pid_direct_roundtrip_works(int target_pid);
+
 #ifndef IFLA_NEW_IFINDEX
 #define IFLA_NEW_IFINDEX 49
 #endif
@@ -3357,7 +3359,7 @@ static inline FILE *redirect_nftables_output(struct nft_ctx *nft)
 }
 #endif
 
-static inline int nftables_lock_network_internal(bool restore)
+int nftables_lock_network_internal(bool restore)
 {
 #if defined(CONFIG_HAS_NFTABLES_LIB_API_0) || defined(CONFIG_HAS_NFTABLES_LIB_API_1)
 	cleanup_file FILE *fp = NULL;
@@ -3418,7 +3420,7 @@ err2:
 #endif
 }
 
-static int iptables_network_lock_internal(void)
+int iptables_network_lock_internal(void)
 {
 	char conf[] = "*filter\n"
 		      ":CRIU - [0:0]\n"
@@ -3450,6 +3452,9 @@ int network_lock_internal(bool restore)
 	if (opts.network_lock_method == NETWORK_LOCK_SKIP)
 		return 0;
 
+	if (!netns_pid_direct_roundtrip_works(root_item->pid->real))
+		return netns_broker_lock_network(root_item->pid->real, restore);
+
 	if (switch_ns(root_item->pid->real, &net_ns_desc, &nsret))
 		return -1;
 
@@ -3464,7 +3469,7 @@ int network_lock_internal(bool restore)
 	return ret;
 }
 
-static inline int nftables_network_unlock(void)
+int nftables_network_unlock(void)
 {
 #if defined(CONFIG_HAS_NFTABLES_LIB_API_0) || defined(CONFIG_HAS_NFTABLES_LIB_API_1)
 	int ret = 0;
@@ -3512,7 +3517,7 @@ static bool iptables_has_criu_jump_target(void)
 	return !ret;
 }
 
-static int iptables_network_unlock_internal(void)
+int iptables_network_unlock_internal(void)
 {
 	char delete_jump_targets[] = "*filter\n"
 				     ":CRIU - [0:0]\n"
@@ -3553,6 +3558,9 @@ static int network_unlock_internal(void)
 
 	if (opts.network_lock_method == NETWORK_LOCK_SKIP)
 		return 0;
+
+	if (!netns_pid_direct_roundtrip_works(root_item->pid->real))
+		return netns_broker_unlock_network(root_item->pid->real);
 
 	if (switch_ns(root_item->pid->real, &net_ns_desc, &nsret))
 		return -1;
@@ -3648,6 +3656,11 @@ static int open_netns_fd(struct ns_id *ns)
 	return do_open_proc(ns->ns_pid, O_RDONLY, "ns/net");
 }
 
+static int open_netns_pid_fd(int pid)
+{
+	return do_open_proc(pid, O_RDONLY, "ns/net");
+}
+
 static bool netns_fd_direct_roundtrip_works(int netns_fd)
 {
 	int old_netns_fd;
@@ -3697,6 +3710,37 @@ static bool netns_direct_roundtrip_works(struct ns_id *ns)
 
 	if (waitpid(pid, &status, 0) < 0) {
 		pr_perror("net: can't wait netns roundtrip probe");
+		return false;
+	}
+
+	return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static bool netns_pid_direct_roundtrip_works(int target_pid)
+{
+	int pid, status;
+
+	pid = fork();
+	if (pid < 0) {
+		pr_perror("net: can't fork pid netns roundtrip probe");
+		return false;
+	}
+
+	if (pid == 0) {
+		int netns_fd = -1;
+
+		netns_fd = open_netns_pid_fd(target_pid);
+		if (netns_fd < 0)
+			_exit(1);
+
+		if (!netns_fd_direct_roundtrip_works(netns_fd))
+			_exit(1);
+
+		_exit(0);
+	}
+
+	if (waitpid(pid, &status, 0) < 0) {
+		pr_perror("net: can't wait pid netns roundtrip probe");
 		return false;
 	}
 
