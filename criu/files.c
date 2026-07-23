@@ -41,6 +41,7 @@
 #include "imgset.h"
 #include "fs-magic.h"
 #include "fdinfo.h"
+#include "filesystems.h"
 #include "cr_options.h"
 #include "autofs.h"
 #include "parasite.h"
@@ -54,6 +55,7 @@
 #include "protobuf.h"
 #include "util.h"
 #include "images/fs.pb-c.h"
+#include "images/mnt.pb-c.h"
 #include "images/ext-file.pb-c.h"
 
 #include "plugin.h"
@@ -495,16 +497,57 @@ static int dump_chrdev(struct fd_parms *p, int lfd, FdinfoEntry *e)
 	return err;
 }
 
-static int dump_one_file(struct pid *pid, int fd, int lfd, struct fd_opts *opts, struct parasite_ctl *ctl,
+static bool is_cgroup_fd_path(const char *path)
+{
+	const char cgroup_root[] = "/sys/fs/cgroup";
+	size_t len = sizeof(cgroup_root) - 1;
+
+	if (strncmp(path, cgroup_root, len))
+		return false;
+
+	return path[len] == '\0' || path[len] == '/';
+}
+
+static bool cgroup_fd_mount_is_external(struct fd_parms *p)
+{
+	struct mount_info *mi;
+
+	if (p->mnt_id < 0)
+		return false;
+
+	mi = lookup_mnt_id(p->mnt_id);
+	if (!mi || !mi->fstype)
+		return false;
+
+	if (mi->fstype->code != FSTYPE__CGROUP && mi->fstype->code != FSTYPE__CGROUP2)
+		return false;
+
+	return mnt_is_nodev_external(mi);
+}
+
+static int dump_one_file(struct pid *pid, int fd, int lfd, struct fd_opts *fdo, struct parasite_ctl *ctl,
 			 FdinfoEntry *e, struct parasite_drain_fd *dfds)
 {
 	struct fd_parms p = FD_PARMS_INIT;
 	const struct fdtype_ops *ops;
 	struct fd_link link;
+	bool link_filled = false;
 
-	if (fill_fd_params(pid, fd, lfd, opts, &p) < 0) {
+	if (fill_fd_params(pid, fd, lfd, fdo, &p) < 0) {
 		pr_err("Can't get stat on %d\n", fd);
 		return -1;
+	}
+
+	if ((opts.unprivileged || in_noninitial_userns()) &&
+	    (S_ISREG(p.stat.st_mode) || S_ISDIR(p.stat.st_mode) || S_ISLNK(p.stat.st_mode))) {
+		if (fill_fdlink(lfd, &p, &link))
+			return -1;
+		link_filled = true;
+		if (is_cgroup_fd_path(link.name + 1) && !cgroup_fd_mount_is_external(&p)) {
+			pr_err("cannot dump cgroup fd %d path %s without external cgroup mount mapping\n", fd,
+			       link.name + 1);
+			return -1;
+		}
 	}
 
 	if (note_file_lock(pid, fd, lfd, &p))
@@ -563,7 +606,7 @@ static int dump_one_file(struct pid *pid, int fd, int lfd, struct fd_opts *opts,
 	}
 
 	if (S_ISREG(p.stat.st_mode) || S_ISDIR(p.stat.st_mode) || S_ISLNK(p.stat.st_mode)) {
-		if (fill_fdlink(lfd, &p, &link))
+		if (!link_filled && fill_fdlink(lfd, &p, &link))
 			return -1;
 
 		p.link = &link;
