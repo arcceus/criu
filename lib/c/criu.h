@@ -145,6 +145,8 @@ int criu_set_network_lock(enum criu_network_lock_method method);
 int criu_join_ns_add(const char *ns, const char *ns_file, const char *extra_opt);
 void criu_set_mntns_compat_mode(bool val);
 int criu_set_config_file(const char *path);
+int criu_set_seccomp_bpf(void *bpf_data, size_t bpf_len);
+int criu_set_seccomp_bpf_flags(unsigned int flags);
 
 /*
  * The criu_notify_arg_t na argument is an opaque
