@@ -915,12 +915,67 @@ static unsigned int subordinate_host_to_userns_id(unsigned int id, bool is_gid)
 	return userns_id_from_extents(fixed, map, n, false);
 }
 
-static void sync_userns_entry(UsernsEntry *e)
+static void free_id_map(UidGidExtent **map, int n)
 {
+	if (n > 0 && map) {
+		xfree(map[0]);
+		xfree(map);
+	}
+}
+
+static int copy_id_map(UidGidExtent **src, int n, UidGidExtent ***dst)
+{
+	UidGidExtent *extents;
+	UidGidExtent **map;
+	int i;
+
+	*dst = NULL;
+	if (n <= 0)
+		return 0;
+	if (!src)
+		return -1;
+
+	extents = xmalloc(sizeof(*extents) * n);
+	if (!extents)
+		return -1;
+
+	map = xmalloc(sizeof(*map) * n);
+	if (!map) {
+		xfree(extents);
+		return -1;
+	}
+
+	for (i = 0; i < n; i++) {
+		uid_gid_extent__init(&extents[i]);
+		extents[i] = *src[i];
+		map[i] = &extents[i];
+	}
+
+	*dst = map;
+	return 0;
+}
+
+static int sync_userns_entry(UsernsEntry *e)
+{
+	UidGidExtent **uid_map = NULL, **gid_map = NULL;
+
+	if (copy_id_map(e->uid_map, e->n_uid_map, &uid_map))
+		return -1;
+
+	if (copy_id_map(e->gid_map, e->n_gid_map, &gid_map)) {
+		free_id_map(uid_map, e->n_uid_map);
+		return -1;
+	}
+
+	free_id_map(userns_entry.uid_map, userns_entry.n_uid_map);
+	free_id_map(userns_entry.gid_map, userns_entry.n_gid_map);
+
 	userns_entry.n_uid_map = e->n_uid_map;
-	userns_entry.uid_map = e->uid_map;
+	userns_entry.uid_map = uid_map;
 	userns_entry.n_gid_map = e->n_gid_map;
-	userns_entry.gid_map = e->gid_map;
+	userns_entry.gid_map = gid_map;
+
+	return 0;
 }
 
 gid_t userns_mnt_opt_fixup_gid(gid_t gid)
@@ -1159,14 +1214,14 @@ int dump_user_ns(pid_t pid, int ns_id)
 
 void free_userns_data(void)
 {
-	if (userns_entry.n_uid_map > 0) {
-		xfree(userns_entry.uid_map[0]);
-		xfree(userns_entry.uid_map);
-	}
-	if (userns_entry.n_gid_map > 0) {
-		xfree(userns_entry.gid_map[0]);
-		xfree(userns_entry.gid_map);
-	}
+	free_id_map(userns_entry.uid_map, userns_entry.n_uid_map);
+	userns_entry.n_uid_map = 0;
+	userns_entry.uid_map = NULL;
+
+	free_id_map(userns_entry.gid_map, userns_entry.n_gid_map);
+	userns_entry.n_gid_map = 0;
+	userns_entry.gid_map = NULL;
+
 	if (userns_entry.n_binfmt_misc > 0)
 		free_pb_binfmt_misc_entries(userns_entry.binfmt_misc, userns_entry.n_binfmt_misc);
 }
@@ -1294,7 +1349,7 @@ int dump_namespaces(struct pstree_item *item, unsigned int ns_flags)
 	return 0;
 }
 
-static int write_id_map(pid_t pid, UidGidExtent **extents, int n, char *id_map)
+static int write_id_map(pid_t pid, UidGidExtent **extents, int n, const char *id_map)
 {
 	char buf[PAGE_SIZE];
 	int off = 0, i;
@@ -1567,9 +1622,11 @@ int __userns_call(const char *func_name, uns_call_t call, int flags, void *arg, 
 
 	/* Decode the result and return */
 
-	if (flags & UNS_FDOUT)
+	if (flags & UNS_FDOUT) {
 		unsc_msg_pid_fd(&um, NULL, &ret);
-	else
+		if (ret < 0 && res < 0)
+			ret = res;
+	} else
 		ret = res;
 out:
 	if (!async)
@@ -1751,8 +1808,8 @@ static int read_user_ns_img(void)
 		return -1;
 	}
 
-	if (ns->user.e)
-		sync_userns_entry(ns->user.e);
+	if (ns->user.e && sync_userns_entry(ns->user.e))
+		return -1;
 
 	return 0;
 }
