@@ -268,6 +268,11 @@ int binfmt_misc_dump_sandboxed(pid_t pid, BinfmtMiscEntry ***pb_bmes)
 		return 0;
 
 	if (!(root_ns_mask & CLONE_NEWUSER)) {
+		if (opts.unprivileged || in_noninitial_userns()) {
+			pr_warn("PID %i is not in a sandbox, skipping binfmt_misc dump "
+				"(registrations in this context will not be restored)\n", pid);
+			return 0;
+		}
 		pr_err("PID %i is not in a sandbox\n", pid);
 		return -1;
 	}
