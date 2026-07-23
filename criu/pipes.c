@@ -3,8 +3,11 @@
 #include <sys/stat.h>
 #include <stdlib.h>
 #include <sys/mman.h>
+#include <sys/ioctl.h>
+#include <errno.h>
 
 #include "crtools.h"
+#include "cr_options.h"
 #include "imgset.h"
 #include "image.h"
 #include "files.h"
@@ -143,6 +146,53 @@ static MAKE_PPREP_HEAD(mark_pipe_master);
 
 static struct pipe_data_rst *pd_hash_pipes[PIPE_DATA_HASH_SIZE];
 
+static bool pipe_resize_denied_in_userns(void)
+{
+	return (opts.unprivileged || in_noninitial_userns()) && errno == EPERM;
+}
+
+static int splice_pipe_data_to_img(struct cr_img *img, int fd, int bytes)
+{
+	while (bytes > 0) {
+		int wrote;
+
+		wrote = splice(fd, NULL, img_raw_fd(img), NULL, bytes, 0);
+		if (wrote < 0) {
+			pr_perror("Can't push pipe data");
+			return -1;
+		} else if (wrote == 0) {
+			pr_err("Short pipe data splice\n");
+			return -1;
+		}
+
+		bytes -= wrote;
+	}
+
+	return 0;
+}
+
+static int tee_pipe_data_to_img(int lfd, int *steal_pipe, struct cr_img *img, int bytes)
+{
+	while (bytes > 0) {
+		int copied;
+
+		copied = tee(lfd, steal_pipe[1], bytes, SPLICE_F_NONBLOCK);
+		if (copied < 0) {
+			pr_perror("Can't pick pipe data");
+			return -1;
+		} else if (copied == 0) {
+			pr_err("Short pipe data tee\n");
+			return -1;
+		}
+
+		if (splice_pipe_data_to_img(img, steal_pipe[0], copied))
+			return -1;
+		bytes -= copied;
+	}
+
+	return 0;
+}
+
 int restore_pipe_data(int img_type, int pfd, u32 id, struct pipe_data_rst **hash)
 {
 	int ret;
@@ -162,8 +212,13 @@ int restore_pipe_data(int img_type, int pfd, u32 id, struct pipe_data_rst **hash
 		pr_info("Restoring size %#x for %#x\n", pd->pde->size, pd->pde->pipe_id);
 		ret = fcntl(pfd, F_SETPIPE_SZ, pd->pde->size);
 		if (ret < 0) {
-			pr_perror("Can't restore pipe size");
-			return -1;
+			if (pipe_resize_denied_in_userns()) {
+				pr_warn("Can't restore pipe size %#x for %#x, using default capacity\n",
+					pd->pde->size, pd->pde->pipe_id);
+			} else {
+				pr_perror("Can't restore pipe size");
+				return -1;
+			}
 		}
 	}
 
@@ -405,6 +460,7 @@ int dump_one_pipe_data(struct pipe_data_dump *pd, int lfd, const struct fd_parms
 	struct cr_img *img;
 	int pipe_size, i, bytes;
 	int steal_pipe[2];
+	bool chunked_tee = false;
 	int ret = -1;
 	PipeDataEntry pde = PIPE_DATA_ENTRY__INIT;
 
@@ -440,18 +496,29 @@ int dump_one_pipe_data(struct pipe_data_dump *pd, int lfd, const struct fd_parms
 
 	/* steal_pipe has to be able to fit all data from a target pipe */
 	if (fcntl(steal_pipe[1], F_SETPIPE_SZ, pipe_size) < 0) {
-		pr_perror("Unable to set a pipe size");
-		goto err_close;
-	}
-
-	bytes = tee(lfd, steal_pipe[1], pipe_size, SPLICE_F_NONBLOCK);
-	if (bytes < 0) {
-		if (errno != EAGAIN) {
-			pr_perror("Can't pick pipe data");
+		if (pipe_resize_denied_in_userns()) {
+			pr_warn("Unable to set steal pipe size to %#x, copying pipe data in chunks\n", pipe_size);
+			if (ioctl(lfd, FIONREAD, &bytes)) {
+				pr_perror("Can't obtain pipe data bytes");
+				goto err_close;
+			}
+			chunked_tee = true;
+		} else {
+			pr_perror("Unable to set a pipe size");
 			goto err_close;
 		}
+	}
 
-		bytes = 0;
+	if (!chunked_tee) {
+		bytes = tee(lfd, steal_pipe[1], pipe_size, SPLICE_F_NONBLOCK);
+		if (bytes < 0) {
+			if (errno != EAGAIN) {
+				pr_perror("Can't pick pipe data");
+				goto err_close;
+			}
+
+			bytes = 0;
+		}
 	}
 
 	pde.pipe_id = pipe_id(p);
@@ -462,15 +529,11 @@ int dump_one_pipe_data(struct pipe_data_dump *pd, int lfd, const struct fd_parms
 	if (pb_write_one(img, &pde, PB_PIPE_DATA))
 		goto err_close;
 
-	while (bytes > 0) {
-		int wrote;
-		wrote = splice(steal_pipe[0], NULL, img_raw_fd(img), NULL, bytes, 0);
-		if (wrote < 0) {
-			pr_perror("Can't push pipe data");
+	if (chunked_tee) {
+		if (tee_pipe_data_to_img(lfd, steal_pipe, img, bytes))
 			goto err_close;
-		} else if (wrote == 0)
-			break;
-		bytes -= wrote;
+	} else if (splice_pipe_data_to_img(img, steal_pipe[0], bytes)) {
+		goto err_close;
 	}
 
 	ret = 0;
