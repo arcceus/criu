@@ -769,11 +769,25 @@ int dump_task_ns_ids(struct pstree_item *item)
 static UsernsEntry userns_entry = USERNS_ENTRY__INIT;
 #define INVALID_ID (~0U)
 
+static int parse_id_map(pid_t pid, char *name, UidGidExtent ***pb_exts);
+
+/*
+ * Only translate host->ns for values that are actually host-shaped (e.g.
+ * mount options parsed from /proc/pid/mountinfo). Rootless dump callers
+ * like ipc_ns.c read already namespace-local values (stat()/shmctl()
+ * after entering the target userns); running those through this lookup
+ * spuriously returns INVALID_ID. Mount-option fixup has its own
+ * unconditional lookup in subordinate_host_to_userns_id() and doesn't
+ * depend on this guard.
+ */
 static unsigned int userns_id(unsigned int id, UidGidExtent **map, int n)
 {
 	int i;
 
 	if (!(root_ns_mask & CLONE_NEWUSER))
+		return id;
+
+	if (!n)
 		return id;
 
 	for (i = 0; i < n; i++) {
@@ -821,6 +835,96 @@ gid_t userns_gid(gid_t gid)
 {
 	UsernsEntry *e = &userns_entry;
 	return userns_id(gid, e->gid_map, e->n_gid_map);
+}
+
+/*
+ * Mount option ID fixup for rootless container restore.
+ *
+ * Rootless runtimes pass host subordinate IDs (e.g. devpts gid=100004)
+ * in mount options. The mount yard creates mounts from CRIU's initial
+ * user namespace, where those host IDs are not mapped. Fixup resolves
+ * them to container-visible IDs so mount(2) succeeds.
+ */
+
+/*
+ * An id is host-subordinate exactly when it falls inside a collected
+ * lower_first..lower_first+count extent (count > 1 excludes the trivial
+ * 1:1 root mapping, e.g. "0 1000 1"). Already container-visible ids
+ * (e.g. gid=5) never match such a range and pass through unchanged, so
+ * this is safe to call on every gid=/uid= mount option unconditionally.
+ */
+static unsigned int userns_id_from_extents(unsigned int id, UidGidExtent **map, int n, bool subordinate_only)
+{
+	int i;
+
+	for (i = 0; i < n; i++) {
+		UidGidExtent *m = map[i];
+		uint64_t lower_first = m->lower_first;
+		uint64_t count = m->count;
+
+		if (subordinate_only && m->count <= 1)
+			continue;
+
+		if (lower_first <= id && lower_first + count > id)
+			return m->first + (id - m->lower_first);
+	}
+
+	return id;
+}
+
+static unsigned int current_userns_host_to_userns_id(unsigned int id, bool is_gid)
+{
+	static UidGidExtent **self_uid_map, **self_gid_map;
+	static int n_self_uid_map = -1, n_self_gid_map = -1;
+	UidGidExtent ***map = is_gid ? &self_gid_map : &self_uid_map;
+	int *n = is_gid ? &n_self_gid_map : &n_self_uid_map;
+
+	if (*n < 0) {
+		*n = parse_id_map(PROC_SELF, is_gid ? "gid_map" : "uid_map", map);
+		if (*n < 0) {
+			pr_warn("Unable to parse current %s_map for mount option id fixup\n",
+				is_gid ? "gid" : "uid");
+			*n = 0;
+		}
+	}
+
+	return userns_id_from_extents(id, *map, *n, false);
+}
+
+static unsigned int subordinate_host_to_userns_id(unsigned int id, bool is_gid)
+{
+	UsernsEntry *e = &userns_entry;
+	UidGidExtent **map = is_gid ? e->gid_map : e->uid_map;
+	int n = is_gid ? e->n_gid_map : e->n_uid_map;
+	unsigned int fixed;
+
+	fixed = userns_id_from_extents(id, map, n, true);
+	if (fixed != id)
+		return fixed;
+
+	fixed = current_userns_host_to_userns_id(id, is_gid);
+	if (fixed == id)
+		return id;
+
+	return userns_id_from_extents(fixed, map, n, false);
+}
+
+static void sync_userns_entry(UsernsEntry *e)
+{
+	userns_entry.n_uid_map = e->n_uid_map;
+	userns_entry.uid_map = e->uid_map;
+	userns_entry.n_gid_map = e->n_gid_map;
+	userns_entry.gid_map = e->gid_map;
+}
+
+gid_t userns_mnt_opt_fixup_gid(gid_t gid)
+{
+	return subordinate_host_to_userns_id(gid, true);
+}
+
+uid_t userns_mnt_opt_fixup_uid(uid_t uid)
+{
+	return subordinate_host_to_userns_id(uid, false);
 }
 
 static int parse_id_map(pid_t pid, char *name, UidGidExtent ***pb_exts)
@@ -904,8 +1008,11 @@ int collect_user_namespaces(bool for_dump)
 	if (!for_dump)
 		return 0;
 
-	if (!(root_ns_mask & CLONE_NEWUSER))
+	if (in_noninitial_userns()) {
+		pr_info("Dumping userns maps from target in non-initial userns\n");
+	} else if (!(root_ns_mask & CLONE_NEWUSER)) {
 		return 0;
+	}
 
 	return walk_namespaces(&user_ns_desc, collect_user_ns, NULL);
 }
@@ -1025,7 +1132,7 @@ int dump_user_ns(pid_t pid, int ns_id)
 		return -1;
 	e->n_gid_map = ret;
 
-	if (check_user_ns(pid))
+	if (!in_noninitial_userns() && check_user_ns(pid))
 		return -1;
 
 	ret = binfmt_misc_dump_sandboxed(pid, &e->binfmt_misc);
@@ -1611,8 +1718,16 @@ static int read_user_ns_img(void)
 	struct cr_img *img;
 	int ret;
 
-	if (!(root_ns_mask & CLONE_NEWUSER))
-		return 0;
+	if (!(root_ns_mask & CLONE_NEWUSER)) {
+		/*
+		 * CRIU shares the user namespace with the target
+		 * (common in rootless podman). The userns image still
+		 * holds the ID maps needed for mount option fixup.
+		 */
+		if (!in_noninitial_userns())
+			return 0;
+		pr_info("read_user_ns_img: userns shared in non-initial userns, loading image for map fixup\n");
+	}
 
 	ns = lookup_ns_by_id(root_item->ids->user_ns_id, &user_ns_desc);
 	if (!ns) {
@@ -1623,12 +1738,15 @@ static int read_user_ns_img(void)
 	img = open_image(CR_FD_USERNS, O_RSTR, root_item->ids->user_ns_id);
 	if (!img)
 		return -1;
-	ret = pb_read_one(img, &ns->user.e, PB_USERNS);
+	ret = pb_read_one_eof(img, &ns->user.e, PB_USERNS);
 	close_image(img);
 	if (ret < 0) {
 		pr_err("Can not read userns object\n");
 		return -1;
 	}
+
+	if (ns->user.e)
+		sync_userns_entry(ns->user.e);
 
 	return 0;
 }
@@ -1848,6 +1966,11 @@ err_out:
 	list_for_each_entry(jn, &opts.join_ns, list)
 		close_safe(&jn->ns_fd);
 	return ret;
+}
+
+int userns_join_ns_requested(void)
+{
+	return !!(join_ns_flags & CLONE_NEWUSER);
 }
 
 int prepare_namespace(struct pstree_item *item, unsigned long clone_flags)
