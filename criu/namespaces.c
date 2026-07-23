@@ -1288,7 +1288,7 @@ int dump_namespaces(struct pstree_item *item, unsigned int ns_flags)
 	return 0;
 }
 
-static int write_id_map(pid_t pid, UidGidExtent **extents, int n, char *id_map)
+static int write_id_map(pid_t pid, UidGidExtent **extents, int n, const char *id_map)
 {
 	char buf[PAGE_SIZE];
 	int off = 0, i;
@@ -1561,9 +1561,11 @@ int __userns_call(const char *func_name, uns_call_t call, int flags, void *arg, 
 
 	/* Decode the result and return */
 
-	if (flags & UNS_FDOUT)
+	if (flags & UNS_FDOUT) {
 		unsc_msg_pid_fd(&um, NULL, &ret);
-	else
+		if (ret < 0 && res < 0)
+			ret = res;
+	} else
 		ret = res;
 out:
 	if (!async)

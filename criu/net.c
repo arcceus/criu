@@ -2258,6 +2258,12 @@ static int ipv4_sysctls_op(SysctlEntry ***rsysctl, size_t *pn, int op)
 		return -EINVAL;
 	}
 
+	if (op == CTL_WRITE && (root_ns_mask & CLONE_NEWUSER) &&
+	    userns_join_ns_requested() && in_noninitial_userns()) {
+		pr_warn("ipv4: skip sysctl restore in joined non-initial userns restore\n");
+		return 0;
+	}
+
 	if (opts.weak_sysctls || op == CTL_READ)
 		flags = CTL_FLAGS_OPTIONAL;
 
@@ -3559,8 +3565,14 @@ static int network_unlock_internal(void)
 	if (opts.network_lock_method == NETWORK_LOCK_SKIP)
 		return 0;
 
-	if (!netns_pid_direct_roundtrip_works(root_item->pid->real))
-		return netns_broker_unlock_network(root_item->pid->real);
+	if (!netns_pid_direct_roundtrip_works(root_item->pid->real)) {
+		ret = netns_broker_unlock_network(root_item->pid->real);
+		if (ret && userns_join_ns_requested()) {
+			pr_warn("net: ignoring network unlock failure for joined external userns restore\n");
+			return 0;
+		}
+		return ret;
+	}
 
 	if (switch_ns(root_item->pid->real, &net_ns_desc, &nsret))
 		return -1;
