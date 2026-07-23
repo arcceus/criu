@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <sys/wait.h>
 #include <sys/msg.h>
 #include <sys/sem.h>
@@ -381,6 +382,16 @@ static int dump_shm_hugetlb_flag(IpcShmEntry *shm, int id, unsigned long size)
 
 	ret = stat(path, &st);
 	if (ret < 0) {
+		/*
+		 * Unprivileged userns dump cannot stat map_files links
+		 * (EPERM). Hugetlb detection is optional, proceed without it.
+		 */
+		if ((opts.unprivileged || in_noninitial_userns()) && errno == EPERM) {
+			pr_warn("Can't stat map_files for IPC shm %#lx-%#lx: %m, assuming non-hugetlb\n",
+				(unsigned long)addr, (unsigned long)addr + size);
+			exit_code = 0;
+			goto detach;
+		}
 		pr_perror("Can't stat map_files");
 		goto detach;
 	}
