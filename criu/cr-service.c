@@ -15,6 +15,8 @@
 #include <arpa/inet.h>
 #include <sched.h>
 #include <sys/prctl.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
 
 #include "version.h"
 #include "crtools.h"
@@ -48,6 +50,18 @@
 #include "cr-errno.h"
 #include "namespaces.h"
 #include "compression.h"
+
+#ifndef SECCOMP_FILTER_FLAG_TSYNC_ESRCH
+#define SECCOMP_FILTER_FLAG_TSYNC_ESRCH (1UL << 4)
+#endif
+
+#ifndef SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV
+#define SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV (1UL << 5)
+#endif
+
+#define SUPPORTED_SECCOMP_FLAGS (SECCOMP_FILTER_FLAG_TSYNC | SECCOMP_FILTER_FLAG_LOG | \
+				 SECCOMP_FILTER_FLAG_SPEC_ALLOW | SECCOMP_FILTER_FLAG_NEW_LISTENER | \
+				 SECCOMP_FILTER_FLAG_TSYNC_ESRCH | SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV)
 
 unsigned int service_sk_ino = -1;
 
@@ -754,6 +768,24 @@ static int setup_opts_from_req(int sk, CriuOpts *req)
 
 	if (req->has_display_stats)
 		opts.display_stats = req->display_stats;
+
+	if (req->has_seccomp_bpf) {
+		if (!req->seccomp_bpf.len || req->seccomp_bpf.len % sizeof(struct sock_filter)) {
+			pr_err("Invalid seccomp BPF length %zu\n", req->seccomp_bpf.len);
+			goto err;
+		}
+		if (req->has_seccomp_bpf_flags && (req->seccomp_bpf_flags & ~SUPPORTED_SECCOMP_FLAGS)) {
+			pr_err("Unsupported seccomp BPF flags 0x%x\n", req->seccomp_bpf_flags);
+			goto err;
+		}
+
+		opts.seccomp_bpf = xmalloc(req->seccomp_bpf.len);
+		if (!opts.seccomp_bpf)
+			goto err;
+		memcpy(opts.seccomp_bpf, req->seccomp_bpf.data, req->seccomp_bpf.len);
+		opts.seccomp_bpf_len = req->seccomp_bpf.len;
+		opts.seccomp_bpf_flags = req->has_seccomp_bpf_flags ? req->seccomp_bpf_flags : 0;
+	}
 
 	/* Evaluate additional configuration file (e.g., runc.conf) to overwrite all RPC settings. */
 	if (req->config_file) {
