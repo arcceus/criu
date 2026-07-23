@@ -14,6 +14,9 @@ int binfmt_misc_dump_sandboxed(pid_t pid, BinfmtMiscEntry ***pb_bmes);
 int binfmt_misc_restore_sandboxed(pid_t pid, BinfmtMiscEntry **bmes, size_t n);
 void free_pb_binfmt_misc_entries(BinfmtMiscEntry **bmes, int n);
 
+/* Paths under /sys/fs/cgroup/ skipped on rootless dump (see filesystems.c). */
+bool cgroup_is_dump_skipped_path(const char *path);
+
 struct fstype {
 	char *name;
 	int code;

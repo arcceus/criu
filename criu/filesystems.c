@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <sys/mount.h>
 
@@ -672,6 +673,45 @@ static int cgroup_parse(struct mount_info *pm)
 	return 0;
 }
 
+/*
+ * True for open paths under /sys/fs/cgroup/ (not the mount root alone).
+ *
+ * In an unprivileged userns restore, cgroup2 can fail to mount from the yard
+ * (EPERM); cgroup_mount() uses a tmpfs placeholder instead. If we dump open
+ * fds on v2 interface files (cpu.max, memory.max, ...), restore tries to
+ * re-open those paths on the empty stub and fails.
+ */
+bool cgroup_is_dump_skipped_path(const char *path)
+{
+	const char prefix[] = "/sys/fs/cgroup/";
+	size_t plen = sizeof(prefix) - 1;
+
+	if (strncmp(path, prefix, plen))
+		return false;
+
+	return path[plen] != '\0';
+}
+
+static int cgroup_mount(struct mount_info *mi, const char *src, const char *fstype, unsigned long mountflags)
+{
+	int ret;
+
+	ret = mount(src, service_mountpoint(mi), fstype, mountflags, mi->options);
+	if (ret == 0)
+		return 0;
+
+	if (opts.mode == CR_RESTORE && (opts.unprivileged || in_noninitial_userns()) &&
+	    (errno == EPERM || errno == EACCES)) {
+		pr_info("mnt: %s mount denied in unprivileged userns restore, tmpfs stub at %s\n",
+			fstype, service_mountpoint(mi));
+		if (!mount("none", service_mountpoint(mi), "tmpfs", mountflags, NULL))
+			return 0;
+	}
+
+	pr_perror("Unable to mount %s %s (id=%d)", src, service_mountpoint(mi), mi->mnt_id);
+	return -1;
+}
+
 static bool btrfs_sb_equal(struct mount_info *a, struct mount_info *b)
 {
 	/* There is a btrfs bug where it doesn't emit subvol= correctly when
@@ -815,12 +855,14 @@ static struct fstype fstypes[] = {
 		.name = "cgroup",
 		.code = FSTYPE__CGROUP,
 		.parse = cgroup_parse,
+		.mount = cgroup_mount,
 		.sb_equal = cgroup_sb_equal,
 	},
 	{
 		.name = "cgroup2",
 		.code = FSTYPE__CGROUP2,
 		.parse = cgroup_parse,
+		.mount = cgroup_mount,
 		.sb_equal = cgroup_sb_equal,
 	},
 	{
