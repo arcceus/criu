@@ -1305,15 +1305,17 @@ struct opt2flag {
 
 static bool sb_opt_cb(char *opt, char *unknown, size_t *uoff)
 {
-	unsigned int id;
+	unsigned int id, fixed;
 
 	if (sscanf(opt, "gid=%u", &id) == 1) {
-		*uoff += sprintf(unknown + *uoff, "gid=%u", userns_gid(id));
+		fixed = userns_mnt_opt_fixup_gid(id);
+		*uoff += sprintf(unknown + *uoff, "gid=%u", fixed);
 		unknown[*uoff] = ',';
 		(*uoff)++;
 		return true;
 	} else if (sscanf(opt, "uid=%u", &id) == 1) {
-		*uoff += sprintf(unknown + *uoff, "uid=%u", userns_uid(id));
+		fixed = userns_mnt_opt_fixup_uid(id);
+		*uoff += sprintf(unknown + *uoff, "uid=%u", fixed);
 		unknown[*uoff] = ',';
 		(*uoff)++;
 		return true;
