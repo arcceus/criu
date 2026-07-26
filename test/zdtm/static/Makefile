@@ -272,7 +272,12 @@ TST_NOFILE	:=				\
 		net_lock_socket_iptables6		\
 		net_lock_socket_nftables		\
 		net_lock_socket_nftables6		\
+		rootless_mount_opts_id		\
 		rootless_runtime_userns		\
+		rootless_runtime_userns_broker	\
+		rootless_sysv_shmem		\
+		rootless_sysv_shmem_map_files	\
+		rootless_uts_rlimit		\
 		netns_sub			\
 		netns_sub_veth			\
 		netns_sub_sysctl	\

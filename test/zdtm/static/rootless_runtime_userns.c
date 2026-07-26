@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include "zdtmtst.h"
@@ -8,6 +9,11 @@ const char *test_author = "Deepak Anand <deepakanand1300@gmail.com>";
 
 int main(int argc, char **argv)
 {
+	char c = 'R';
+	int client, accepted;
+	int port = 23456;
+	int server = -1;
+
 	test_init(argc, argv);
 
 	if (system("ip link set lo up")) {
@@ -30,6 +36,12 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	server = tcp_init_server(AF_INET, &port);
+	if (server < 0) {
+		fail("Can't create TCP server");
+		return 1;
+	}
+
 	if (system("ip link > rootless_runtime_userns.dump.test && ip addr >> rootless_runtime_userns.dump.test && ip route >> rootless_runtime_userns.dump.test")) {
 		fail("Can't save net config");
 		return 1;
@@ -47,6 +59,38 @@ int main(int argc, char **argv)
 		fail("Net config differs after restore");
 		return 1;
 	}
+
+	client = tcp_init_client(AF_INET, "127.0.0.1", port);
+	if (client < 0) {
+		fail("Can't connect to restored TCP server");
+		return 1;
+	}
+
+	accepted = tcp_accept_server(server);
+	if (accepted < 0) {
+		fail("Can't accept on restored TCP server");
+		return 1;
+	}
+
+	if (write(client, &c, sizeof(c)) != sizeof(c)) {
+		fail("Can't write to restored TCP connection");
+		return 1;
+	}
+
+	c = '\0';
+	if (read(accepted, &c, sizeof(c)) != sizeof(c)) {
+		fail("Can't read from restored TCP connection");
+		return 1;
+	}
+
+	if (c != 'R') {
+		fail("Unexpected byte from restored TCP connection: %c", c);
+		return 1;
+	}
+
+	close(accepted);
+	close(client);
+	close(server);
 
 	pass();
 	return 0;

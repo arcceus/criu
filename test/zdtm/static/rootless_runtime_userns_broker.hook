@@ -1,0 +1,9 @@
+#!/bin/bash
+
+"$(dirname "$0")/rootless_runtime_userns.hook" "$@"
+
+case "$1" in
+--pre-restore)
+	chmod 0666 zdtm/static/rootless_runtime_userns_broker.out* 2>/dev/null || true
+	;;
+esac
