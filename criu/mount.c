@@ -3521,6 +3521,13 @@ int depopulate_roots_yard(int mntns_fd, bool only_ghosts)
 
 	old_cwd = open(".", O_PATH);
 	if (old_cwd < 0) {
+		int err = errno;
+
+		if (userns_join_ns_requested() && (err == EPERM || err == EACCES)) {
+			pr_info("Unable to open cwd in joined userns, leaving roots yard for runtime namespace teardown\n");
+			return 0;
+		}
+		errno = err;
 		pr_perror("Unable to open cwd");
 		return -1;
 	}
@@ -3532,6 +3539,15 @@ int depopulate_roots_yard(int mntns_fd, bool only_ghosts)
 		return -1;
 	}
 	if (setns(mntns_fd, CLONE_NEWNS) < 0) {
+		int err = errno;
+
+		if (userns_join_ns_requested() && (err == EPERM || err == EACCES)) {
+			pr_info("Can't switch to restored mount namespace in joined userns, leaving roots yard for runtime namespace teardown\n");
+			close(old_ns);
+			close(old_cwd);
+			return 0;
+		}
+		errno = err;
 		pr_perror("`- Can't switch");
 		close(old_ns);
 		close(old_cwd);
