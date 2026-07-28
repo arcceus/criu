@@ -37,6 +37,7 @@
 #include "cgroup.h"
 #include "cgroup-props.h"
 #include "action-scripts.h"
+#include "seccomp-flags.h"
 #include "sockets.h"
 #include "irmap.h"
 #include "kerndat.h"
@@ -50,18 +51,6 @@
 #include "cr-errno.h"
 #include "namespaces.h"
 #include "compression.h"
-
-#ifndef SECCOMP_FILTER_FLAG_TSYNC_ESRCH
-#define SECCOMP_FILTER_FLAG_TSYNC_ESRCH (1UL << 4)
-#endif
-
-#ifndef SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV
-#define SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV (1UL << 5)
-#endif
-
-#define SUPPORTED_SECCOMP_FLAGS (SECCOMP_FILTER_FLAG_TSYNC | SECCOMP_FILTER_FLAG_LOG | \
-				 SECCOMP_FILTER_FLAG_SPEC_ALLOW | SECCOMP_FILTER_FLAG_NEW_LISTENER | \
-				 SECCOMP_FILTER_FLAG_TSYNC_ESRCH | SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV)
 
 unsigned int service_sk_ino = -1;
 

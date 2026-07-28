@@ -17,6 +17,7 @@
 #include "criu.h"
 #include "rpc.pb-c.h"
 #include "cr-service-const.h"
+#include "seccomp-flags.h"
 
 #define CR_DEFAULT_SERVICE_BIN "criu"
 
@@ -2185,18 +2186,6 @@ int criu_set_seccomp_bpf(void *bpf_data, size_t bpf_len)
 {
 	return criu_local_set_seccomp_bpf(global_opts, bpf_data, bpf_len);
 }
-
-#ifndef SECCOMP_FILTER_FLAG_TSYNC_ESRCH
-#define SECCOMP_FILTER_FLAG_TSYNC_ESRCH (1UL << 4)
-#endif
-
-#ifndef SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV
-#define SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV (1UL << 5)
-#endif
-
-#define SUPPORTED_SECCOMP_FLAGS (SECCOMP_FILTER_FLAG_TSYNC | SECCOMP_FILTER_FLAG_LOG | \
-				 SECCOMP_FILTER_FLAG_SPEC_ALLOW | SECCOMP_FILTER_FLAG_NEW_LISTENER | \
-				 SECCOMP_FILTER_FLAG_TSYNC_ESRCH | SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV)
 
 int criu_local_set_seccomp_bpf_flags(criu_opts *opts, unsigned int flags)
 {
