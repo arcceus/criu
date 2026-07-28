@@ -271,6 +271,7 @@ TST_NOFILE	:=				\
 		net_lock_socket_iptables6		\
 		net_lock_socket_nftables		\
 		net_lock_socket_nftables6		\
+		rootless_sysv_shmem		\
 		netns_sub			\
 		netns_sub_veth			\
 		netns_sub_sysctl	\
