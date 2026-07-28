@@ -272,6 +272,7 @@ TST_NOFILE	:=				\
 		net_lock_socket_nftables		\
 		net_lock_socket_nftables6		\
 		rootless_sysv_shmem		\
+		rootless_sysv_shmem_map_files_denied	\
 		netns_sub			\
 		netns_sub_veth			\
 		netns_sub_sysctl	\
