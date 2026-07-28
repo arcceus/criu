@@ -11,6 +11,4 @@ extern int mntns_broker_mount(int pid, const char *src, const char *target,
 			      const char *fstype, unsigned long flags,
 			      const char *data);
 
-extern int mntns_broker_umount2(int pid, const char *target, int flags);
-
 #endif /* __CR_MNTNS_BROKER_H__ */

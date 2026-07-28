@@ -21,7 +21,6 @@
 
 enum {
 	MNT_BROKER_OP_MOUNT = 1,
-	MNT_BROKER_OP_UMOUNT2,
 };
 
 struct mount_broker_msg {
@@ -31,7 +30,6 @@ struct mount_broker_msg {
 
 struct mount_broker_args {
 	int op;
-	int umount_flags;
 	unsigned long mount_flags;
 	char src[MNT_BROKER_PATH_MAX];
 	char target[MNT_BROKER_PATH_MAX];
@@ -109,18 +107,10 @@ static int mntns_broker_run(int pid, struct mount_broker_args *args,
 		if (mntns_broker_enter(pid, op_name))
 			goto child_err;
 
-		if (userns_broker_enter_creds("mntns broker", NULL))
-			goto child_err;
-
-		if (userns_broker_drop_groups("mntns broker", NULL))
-			goto child_err;
-
 		if (args->op == MNT_BROKER_OP_MOUNT) {
 			ret = mount(args->src[0] ? args->src : NULL, args->target,
 				    args->fstype[0] ? args->fstype : NULL, args->mount_flags,
 				    args->data[0] ? args->data : NULL);
-		} else if (args->op == MNT_BROKER_OP_UMOUNT2) {
-			ret = umount2(args->target, args->umount_flags);
 		} else {
 			errno = EINVAL;
 			ret = -1;
@@ -192,29 +182,6 @@ int mntns_broker_mount(int pid, const char *src, const char *target,
 	if (mntns_broker_run(pid, &args, "mount")) {
 		pr_perror("mntns broker: mount %s -> %s failed",
 			  src ? src : "(null)", target);
-		return -1;
-	}
-
-	return 0;
-}
-
-int mntns_broker_umount2(int pid, const char *target, int flags)
-{
-	struct mount_broker_args args = {
-		.op = MNT_BROKER_OP_UMOUNT2,
-		.umount_flags = flags,
-	};
-
-	if (!target) {
-		pr_err("mntns broker: missing umount target\n");
-		return -1;
-	}
-
-	if (copy_mount_string(args.target, sizeof(args.target), target))
-		return -1;
-
-	if (mntns_broker_run(pid, &args, "umount")) {
-		pr_perror("mntns broker: umount2 %s failed", target);
 		return -1;
 	}
 
