@@ -57,12 +57,12 @@ int main(int argc, char **argv)
 
 	test_init(argc, argv);
 
-	if (sethostname(ZDTM_NODE, sizeof(ZDTM_NODE))) {
+	if (sethostname(ZDTM_NODE, strlen(ZDTM_NODE))) {
 		pr_perror("sethostname");
 		return 1;
 	}
 
-	if (setdomainname(ZDTM_DOMAIN, sizeof(ZDTM_DOMAIN))) {
+	if (setdomainname(ZDTM_DOMAIN, strlen(ZDTM_DOMAIN))) {
 		pr_perror("setdomainname");
 		return 1;
 	}
