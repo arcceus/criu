@@ -1454,9 +1454,11 @@ int __userns_call(const char *func_name, uns_call_t call, int flags, void *arg, 
 
 	/* Decode the result and return */
 
-	if (flags & UNS_FDOUT)
+	if (flags & UNS_FDOUT) {
 		unsc_msg_pid_fd(&um, NULL, &ret);
-	else
+		if (ret < 0 && res < 0)
+			ret = res;
+	} else
 		ret = res;
 out:
 	if (!async)
@@ -1811,13 +1813,33 @@ static int switch_user_join_ns(struct join_ns *jn)
 	 * if err occurs in setuid/setgid, should we just alert or
 	 * return an error
 	 */
+	if (setgid(gid)) {
+		pr_perror("setgid failed while joining userns");
+		return -1;
+	}
 	if (setuid(uid)) {
 		pr_perror("setuid failed while joining userns");
 		return -1;
 	}
-	if (setgid(gid)) {
-		pr_perror("setgid failed while joining userns");
-		return -1;
+
+	return 0;
+}
+
+int join_user_namespace(void)
+{
+	struct join_ns *jn;
+	int ret;
+
+	list_for_each_entry(jn, &opts.join_ns, list) {
+		if (jn->nd != &user_ns_desc)
+			continue;
+
+		if (get_join_ns_fd(jn))
+			return -1;
+
+		ret = switch_user_join_ns(jn);
+		close_safe(&jn->ns_fd);
+		return ret;
 	}
 
 	return 0;
@@ -1848,6 +1870,11 @@ err_out:
 	list_for_each_entry(jn, &opts.join_ns, list)
 		close_safe(&jn->ns_fd);
 	return ret;
+}
+
+int userns_join_ns_requested(void)
+{
+	return !!(join_ns_flags & CLONE_NEWUSER);
 }
 
 int prepare_namespace(struct pstree_item *item, unsigned long clone_flags)
