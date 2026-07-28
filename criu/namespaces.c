@@ -1454,9 +1454,11 @@ int __userns_call(const char *func_name, uns_call_t call, int flags, void *arg, 
 
 	/* Decode the result and return */
 
-	if (flags & UNS_FDOUT)
+	if (flags & UNS_FDOUT) {
 		unsc_msg_pid_fd(&um, NULL, &ret);
-	else
+		if (ret < 0 && res < 0)
+			ret = res;
+	} else
 		ret = res;
 out:
 	if (!async)
@@ -1848,6 +1850,11 @@ err_out:
 	list_for_each_entry(jn, &opts.join_ns, list)
 		close_safe(&jn->ns_fd);
 	return ret;
+}
+
+int userns_join_ns_requested(void)
+{
+	return !!(join_ns_flags & CLONE_NEWUSER);
 }
 
 int prepare_namespace(struct pstree_item *item, unsigned long clone_flags)

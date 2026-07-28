@@ -2255,6 +2255,12 @@ static int ipv4_sysctls_op(SysctlEntry ***rsysctl, size_t *pn, int op)
 		return -EINVAL;
 	}
 
+	if (op == CTL_WRITE && (root_ns_mask & CLONE_NEWUSER) &&
+	    userns_join_ns_requested() && in_noninitial_userns()) {
+		pr_warn("ipv4: skip sysctl restore in joined non-initial userns restore\n");
+		return 0;
+	}
+
 	if (opts.weak_sysctls || op == CTL_READ)
 		flags = CTL_FLAGS_OPTIONAL;
 
