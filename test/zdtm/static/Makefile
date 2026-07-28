@@ -278,6 +278,7 @@ TST_NOFILE	:=				\
 		rootless_mount_opts_id		\
 		rootless_mntns_broker		\
 		rootless_uts_rlimit		\
+		rootless_sysv_shmem		\
 		netns_sub			\
 		netns_sub_veth			\
 		netns_sub_sysctl	\
