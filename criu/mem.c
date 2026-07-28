@@ -526,7 +526,7 @@ static int generate_vma_iovs(struct pstree_item *item, struct vma_area *vma, str
 	 */
 
 	if (!(vma->e->prot & PROT_READ)) {
-		if (mem_read_externally())
+		if (mem_read_externally() && pre_dump)
 			return 0;
 		if ((parent_predump_mode == PRE_DUMP_READ && opts.pre_dump_mode == PRE_DUMP_SPLICE) || !pre_dump)
 			has_parent = false;
