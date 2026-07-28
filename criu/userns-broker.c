@@ -25,6 +25,12 @@ int userns_broker_drop_groups(const char *broker_name, const char *op_name)
 			gid_t *groups = NULL;
 			int i, nr_groups;
 
+			/*
+			 * setgroups() can already be blocked after entering a
+			 * non-initial user namespace. That is acceptable only
+			 * when no supplementary groups can escape the target
+			 * namespace credentials.
+			 */
 			nr_groups = getgroups(0, NULL);
 			if (nr_groups > 0) {
 				groups = xmalloc(sizeof(*groups) * nr_groups);
