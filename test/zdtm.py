@@ -391,6 +391,13 @@ def tail(path):
     return out.decode()
 
 
+def fault_is_fatal(fault):
+    try:
+        return int(fault) < 128
+    except ValueError:
+        return False
+
+
 def rpidfile(path):
     with open(path) as fd:
         return fd.readline().strip()
@@ -1367,7 +1374,7 @@ class criu:
 
         grep_errors(os.path.join(__ddir, log))
         if ret != 0:
-            if self.__fault and int(self.__fault) < 128:
+            if self.__fault and fault_is_fatal(self.__fault):
                 try_run_hook(self.__test, ["--fault", action])
                 if action == "dump":
                     # create a clean directory for images
