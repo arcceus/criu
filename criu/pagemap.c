@@ -2798,6 +2798,12 @@ static int open_pagemap_parent(int dfd, int *pfd)
 		return -errno;
 	}
 
+	/*
+	 * Unlike generic image opens, parent pagemap opens are optional during
+	 * joined-userns restore. Do not route this through usernsd: the caller
+	 * tolerates inaccessible parents and restore will fail later only if a
+	 * required page really has to be read from that parent image.
+	 */
 	*pfd = openat(dfd, CR_PARENT_LINK, O_RDONLY);
 	if (*pfd < 0)
 		return -errno;
