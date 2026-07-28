@@ -792,6 +792,12 @@ static int do_dump_one_shmem(int fd, void *addr, struct shmem_info *si)
 		unsigned long pgaddr;
 		int st = -1;
 
+		/*
+		 * When fd < 0, shmem is dumped from the mapped address because
+		 * map_files is not accessible. There is no file descriptor for
+		 * SEEK_DATA/SEEK_HOLE in that path, so sparse segments are dumped
+		 * as data instead of preserving hole metadata.
+		 */
 		if (fd >= 0 && pfn >= next_hole_pfn && next_data_segment(fd, pfn, &next_data_pnf, &next_hole_pfn))
 			goto err_xfer;
 
