@@ -278,6 +278,7 @@ TST_NOFILE	:=				\
 		rootless_netns_broker		\
 		rootless_mount_opts_id		\
 		rootless_mntns_broker		\
+		rootless_mntns_remount_flags	\
 		rootless_uts_rlimit		\
 		rootless_sysv_shmem		\
 		rootless_sysv_shmem_map_files_denied	\
