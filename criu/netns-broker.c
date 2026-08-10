@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <sched.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -16,6 +17,7 @@
 #include "cr_options.h"
 #include "external.h"
 #include "fdstore.h"
+#include "fault-injection.h"
 #include "kerndat.h"
 #include "log.h"
 #include "lsm.h"
@@ -32,6 +34,26 @@
 struct prep_msg {
 	int ret;
 };
+
+static int send_broker_status(int sk, const struct prep_msg *msg, const char *op_name)
+{
+	if (write_all(sk, msg, sizeof(*msg)) != sizeof(*msg)) {
+		pr_perror("netns broker %s: send status", op_name);
+		return -1;
+	}
+
+	return 0;
+}
+
+static int recv_broker_status(int sk, struct prep_msg *msg, const char *op_name)
+{
+	if (read_all(sk, msg, sizeof(*msg)) != sizeof(*msg)) {
+		pr_perror("netns broker %s: recv status", op_name);
+		return -1;
+	}
+
+	return 0;
+}
 
 static int prep_sockets_in_child(bool for_dump, int root_pid, int *nlsk, int *seqsk)
 {
@@ -291,22 +313,21 @@ int netns_broker_lock_network(int pid, bool restore)
 		else
 			msg.ret = -1;
 
-		send_fds(sk[1], NULL, 0, NULL, 0, &msg, sizeof(msg));
+		send_broker_status(sk[1], &msg, "lock");
 
 		close(sk[1]);
 		_exit(msg.ret ? 1 : 0);
 
 child_err:
 		msg.ret = -1;
-		send_fds(sk[1], NULL, 0, NULL, 0, &msg, sizeof(msg));
+		send_broker_status(sk[1], &msg, "lock");
 		close(sk[1]);
 		_exit(1);
 	}
 
 	close(sk[1]);
 
-	if (recv_fds(sk[0], NULL, 0, &msg, sizeof(msg)) < 0) {
-		pr_perror("netns broker lock: recv msg");
+	if (recv_broker_status(sk[0], &msg, "lock")) {
 		close(sk[0]);
 		waitpid(child_pid, &status, 0);
 		return -1;
@@ -353,30 +374,37 @@ int netns_broker_unlock_network(int pid)
 		if (broker_enter_userns_netns(pid, "unlock"))
 			goto child_err;
 
-		msg.ret = 0;
-		if (opts.network_lock_method == NETWORK_LOCK_NFTABLES)
+		if (fault_injected(FI_NETNS_BROKER_UNLOCK_ABSENT)) {
+			if (opts.network_lock_method == NETWORK_LOCK_NFTABLES && nftables_network_unlock())
+				pr_warn("netns broker unlock: failed to remove lock before absent fault\n");
+			pr_info("netns broker unlock: forcing already-absent lock state\n");
+			msg.ret = -ENOENT;
+		} else if (fault_injected(FI_NETNS_BROKER_UNLOCK_FAIL)) {
+			pr_info("netns broker unlock: forcing unlock failure\n");
+			msg.ret = -EIO;
+		} else if (opts.network_lock_method == NETWORK_LOCK_NFTABLES) {
 			msg.ret = nftables_network_unlock();
-		else if (opts.network_lock_method == NETWORK_LOCK_IPTABLES)
+		} else if (opts.network_lock_method == NETWORK_LOCK_IPTABLES) {
 			msg.ret = iptables_network_unlock_internal();
-		else
+		} else {
 			msg.ret = -1;
+		}
 
-		send_fds(sk[1], NULL, 0, NULL, 0, &msg, sizeof(msg));
+		send_broker_status(sk[1], &msg, "unlock");
 
 		close(sk[1]);
 		_exit(msg.ret ? 1 : 0);
 
 child_err:
 		msg.ret = -1;
-		send_fds(sk[1], NULL, 0, NULL, 0, &msg, sizeof(msg));
+		send_broker_status(sk[1], &msg, "unlock");
 		close(sk[1]);
 		_exit(1);
 	}
 
 	close(sk[1]);
 
-	if (recv_fds(sk[0], NULL, 0, &msg, sizeof(msg)) < 0) {
-		pr_perror("netns broker unlock: recv msg");
+	if (recv_broker_status(sk[0], &msg, "unlock")) {
 		close(sk[0]);
 		waitpid(child_pid, &status, 0);
 		return -1;
@@ -389,10 +417,15 @@ child_err:
 		return -1;
 	}
 
+	if (WIFEXITED(status) && msg.ret == -ENOENT) {
+		pr_info("netns broker unlock: network lock is already absent\n");
+		return -ENOENT;
+	}
+
 	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || msg.ret) {
 		pr_err("netns broker unlock: child failed (exit %d, ret %d)\n",
 		       WIFEXITED(status) ? WEXITSTATUS(status) : -1, msg.ret);
-		return -1;
+		return msg.ret < 0 ? msg.ret : -1;
 	}
 
 	pr_info("Unlocked network via broker for pid %d\n", pid);

@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <linux/netlink.h>
@@ -3497,8 +3498,12 @@ int nftables_network_unlock(void)
 		return -1;
 
 	snprintf(buf, sizeof(buf), "delete table %s", table);
-	if (NFT_RUN_CMD(nft, buf))
-		ret = -1;
+	if (NFT_RUN_CMD(nft, buf)) {
+		if (errno == ENOENT)
+			ret = -ENOENT;
+		else
+			ret = -1;
+	}
 
 	nft_ctx_free(nft);
 	return ret;
@@ -3568,8 +3573,8 @@ static int network_unlock_internal(void)
 
 	if (!netns_pid_direct_roundtrip_works(root_item->pid->real)) {
 		ret = netns_broker_unlock_network(root_item->pid->real);
-		if (ret && userns_join_ns_requested()) {
-			pr_warn("net: ignoring network unlock failure for joined external userns restore\n");
+		if (ret == -ENOENT) {
+			pr_info("net: network lock already absent during unlock\n");
 			return 0;
 		}
 		return ret;
@@ -3606,20 +3611,29 @@ int network_lock(void)
 	return network_lock_internal(false);
 }
 
-void network_unlock(void)
+int network_unlock(void)
 {
+	int ret = 0;
+
 	pr_info("Unlock network\n");
 
 	cpt_unlock_tcp_connections();
 	rst_unlock_tcp_connections();
 
 	if (root_ns_mask & CLONE_NEWNET) {
-		/* coverity[check_return] */
-		run_scripts(ACT_NET_UNLOCK);
-		network_unlock_internal();
+		ret = run_scripts(ACT_NET_UNLOCK);
+		if (network_unlock_internal())
+			ret = -1;
 	} else if (opts.network_lock_method == NETWORK_LOCK_NFTABLES) {
-		nftables_network_unlock();
+		ret = nftables_network_unlock();
 	}
+
+	if (ret == -ENOENT) {
+		pr_info("net: network lock already absent during unlock\n");
+		return 0;
+	}
+
+	return ret;
 }
 
 int veth_pair_add(char *in, char *out)
@@ -3679,7 +3693,9 @@ static bool netns_fd_direct_roundtrip_works(int netns_fd)
 	int old_netns_fd;
 	bool ret = false;
 
-	if (fault_injected(FI_NETNS_DIRECT_ROUNDTRIP_FAIL)) {
+	if (fault_injected(FI_NETNS_DIRECT_ROUNDTRIP_FAIL) ||
+	    fault_injected(FI_NETNS_BROKER_UNLOCK_ABSENT) ||
+	    fault_injected(FI_NETNS_BROKER_UNLOCK_FAIL)) {
 		pr_info("Forcing direct netns roundtrip failure\n");
 		return false;
 	}
