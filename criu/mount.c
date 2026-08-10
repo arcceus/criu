@@ -2299,19 +2299,28 @@ int mount_root(void *args, int fd, pid_t pid)
  */
 static int remount_bind_flags(struct mount_info *mi, unsigned long mflags, bool after_bind)
 {
+	int err;
+
 	if (!mflags)
 		return 0;
 
-	if (!criu_mount_at(NULL, service_mountpoint(mi), NULL, MS_BIND | MS_REMOUNT | mflags, NULL))
+	if (opts.mode == CR_RESTORE && fault_injected(FI_MNTNS_REMOUNT_DENIED)) {
+		pr_info("mnt: forcing remount denial at %s\n", service_mountpoint(mi));
+		err = EPERM;
+	} else if (!criu_mount_at(NULL, service_mountpoint(mi), NULL, MS_BIND | MS_REMOUNT | mflags, NULL)) {
 		return 0;
+	} else {
+		err = errno;
+	}
 
-	if ((opts.unprivileged || in_noninitial_userns()) && opts.mode == CR_RESTORE &&
-	    (errno == EPERM || errno == EACCES)) {
-		pr_warn("mnt: re-mount EPERM at %s in non-initial userns restore, per-mount flags dropped (nosuid,noexec,nodev,etc.)\n",
+	if (after_bind && (opts.unprivileged || in_noninitial_userns()) && opts.mode == CR_RESTORE &&
+	    (err == EPERM || err == EACCES)) {
+		pr_warn("mnt: skipping denied bind remount at %s in non-initial userns restore; using inherited mount flags\n",
 			service_mountpoint(mi));
 		return 0;
 	}
 
+	errno = err;
 	pr_perror("Can't re-mount at %s", service_mountpoint(mi));
 	return -1;
 }
