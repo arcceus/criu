@@ -2287,6 +2287,119 @@ int mount_root(void *args, int fd, pid_t pid)
 	return userns_mount(opts.root, args, fd, pid);
 }
 
+static void cure_mountinfo_path(char *path)
+{
+	int i, len, off = 0;
+
+	if (!strchr(path, '\\'))
+		return;
+
+	len = strlen(path);
+	for (i = 0; i < len; i++) {
+		if (!strncmp(path + i, "\\040", 4)) {
+			path[i - off] = ' ';
+			goto replace;
+		} else if (!strncmp(path + i, "\\011", 4)) {
+			path[i - off] = '\t';
+			goto replace;
+		} else if (!strncmp(path + i, "\\134", 4)) {
+			path[i - off] = '\\';
+			goto replace;
+		}
+		if (off)
+			path[i - off] = path[i];
+		continue;
+	replace:
+		off += 3;
+		i += 3;
+	}
+	path[i - off] = '\0';
+}
+
+static unsigned long mountinfo_opt_flags(char *opts)
+{
+	unsigned long flags = 0;
+	char *opt;
+
+	while ((opt = strsep(&opts, ","))) {
+		if (!strcmp(opt, "ro"))
+			flags |= MS_RDONLY;
+		else if (!strcmp(opt, "nosuid"))
+			flags |= MS_NOSUID;
+		else if (!strcmp(opt, "nodev"))
+			flags |= MS_NODEV;
+		else if (!strcmp(opt, "noexec"))
+			flags |= MS_NOEXEC;
+	}
+
+	return flags;
+}
+
+static int read_mount_flags(const char *path, unsigned long *flags)
+{
+	FILE *f;
+	char *line = NULL;
+	size_t len = 0;
+	int ret = -1;
+
+	f = fopen_proc(PROC_SELF, "mountinfo");
+	if (!f)
+		return -1;
+
+	while (getline(&line, &len, f) > 0) {
+		char *cursor = line;
+		char *mnt = NULL, *opts = NULL;
+		int field;
+
+		for (field = 1; field <= 6; field++) {
+			char *tok = strsep(&cursor, " ");
+
+			if (!tok)
+				break;
+			if (field == 5)
+				mnt = tok;
+			else if (field == 6)
+				opts = tok;
+		}
+
+		if (!mnt || !opts)
+			continue;
+
+		cure_mountinfo_path(mnt);
+		if (strcmp(mnt, path))
+			continue;
+
+		*flags = mountinfo_opt_flags(opts);
+		ret = 0;
+		break;
+	}
+
+	xfree(line);
+	fclose(f);
+	return ret;
+}
+
+static bool bind_remount_flags_inherited(struct mount_info *mi, unsigned long mflags)
+{
+	unsigned long restored_flags, required_flags;
+
+	required_flags = mflags & (MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC);
+	if (!required_flags)
+		return true;
+
+	if (read_mount_flags(service_mountpoint(mi), &restored_flags)) {
+		pr_err("Can't read restored mount flags for %s\n", service_mountpoint(mi));
+		return false;
+	}
+
+	if ((restored_flags & required_flags) == required_flags)
+		return true;
+
+	pr_err("Denied bind remount at %s did not inherit required flags %#lx (actual %#lx)\n",
+	       service_mountpoint(mi), required_flags, restored_flags);
+	return false;
+}
+
 /*
  * Apply per-mount flags after a bind mount, or after a fresh mount when
  * mflags could not be merged into the initial mount(2) call.
@@ -2315,9 +2428,11 @@ static int remount_bind_flags(struct mount_info *mi, unsigned long mflags, bool 
 
 	if (after_bind && (opts.unprivileged || in_noninitial_userns()) && opts.mode == CR_RESTORE &&
 	    (err == EPERM || err == EACCES)) {
-		pr_warn("mnt: skipping denied bind remount at %s in non-initial userns restore; using inherited mount flags\n",
-			service_mountpoint(mi));
-		return 0;
+		if (bind_remount_flags_inherited(mi, mflags)) {
+			pr_warn("mnt: skipping denied bind remount at %s in non-initial userns restore; required flags already inherited\n",
+				service_mountpoint(mi));
+			return 0;
+		}
 	}
 
 	errno = err;
