@@ -3,7 +3,8 @@
 
 /*
  * Enter the target process user namespace (userns-first broker step).
- * EINVAL from setns(CLONE_NEWUSER) is treated as already inside the ns.
+ * EINVAL from setns(CLONE_NEWUSER) is accepted only after comparing the
+ * current and requested namespace identities.
  */
 
 extern int userns_broker_drop_groups(const char *broker_name, const char *op_name);
