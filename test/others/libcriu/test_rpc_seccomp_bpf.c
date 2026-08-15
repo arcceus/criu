@@ -35,6 +35,7 @@ int main(int argc, char **argv)
 	ret |= expect_ret("flags before BPF", criu_set_seccomp_bpf_flags(0), -EINVAL);
 	ret |= expect_ret("valid BPF", criu_set_seccomp_bpf(allow, sizeof(allow)), 0);
 	ret |= expect_ret("valid flags", criu_set_seccomp_bpf_flags(SECCOMP_FILTER_FLAG_TSYNC), 0);
+	ret |= expect_ret("listener flag", criu_set_seccomp_bpf_flags(SECCOMP_FILTER_FLAG_NEW_LISTENER), -EINVAL);
 	ret |= expect_ret("unsupported flags", criu_set_seccomp_bpf_flags(0xffffffff), -EINVAL);
 
 	return ret ? EXIT_FAILURE : EXIT_SUCCESS;

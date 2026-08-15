@@ -6,6 +6,7 @@
 
 #include "common/config.h"
 #include "cr_options.h"
+#include "external.h"
 #include "fault-injection.h"
 #include "imgset.h"
 #include "kcmp.h"
@@ -149,8 +150,8 @@ static int collect_filter(struct seccomp_entry *entry)
 			if (errno == ENOENT) {
 				break;
 			}
-			if ((opts.unprivileged || in_noninitial_userns()) &&
-			    (errno == EPERM || errno == EACCES) && i == 0 && !entry->nr_chains) {
+			if ((errno == EPERM || errno == EACCES) && i == 0 && !entry->nr_chains &&
+			    external_lookup_id("seccomp")) {
 				/*
 				 * BPF extraction is blocked by the
 				 * userns boundary. The filter count
@@ -164,7 +165,7 @@ static int collect_filter(struct seccomp_entry *entry)
 				 * controllers are silently dropped.
 				 */
 				pr_warn("Can't fetch seccomp filter on tid_real %d: "
-					"skipping BPF dump because ptrace access is blocked\n",
+					"skipping BPF dump because seccomp is external\n",
 					entry->tid_real);
 				return 0;
 			}
