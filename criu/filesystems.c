@@ -682,9 +682,10 @@ static int cgroup_mount(struct mount_info *mi, const char *src, const char *fsty
 	if (ret == 0)
 		return 0;
 
-	if (opts.mode == CR_RESTORE && (opts.unprivileged || in_noninitial_userns()) &&
+	if (opts.mode == CR_RESTORE && mnt_is_nodev_external(mi) &&
+	    (opts.unprivileged || in_noninitial_userns()) &&
 	    (errno == EPERM || errno == EACCES)) {
-		pr_info("mnt: %s mount denied in unprivileged userns restore, tmpfs stub at %s\n",
+		pr_info("mnt: external %s mount denied in unprivileged userns restore, tmpfs stub at %s\n",
 			fstype, service_mountpoint(mi));
 		if (!mount("none", service_mountpoint(mi), "tmpfs", mountflags, NULL))
 			return 0;
