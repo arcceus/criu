@@ -310,6 +310,9 @@ try_again:
 
 	if (ss->seccomp_mode != SECCOMP_MODE_DISABLED) {
 		if (ptrace_suspend_seccomp(pid) < 0) {
+			if (errno != EPERM && errno != EACCES)
+				return -1;
+
 			pr_warn("Unable to suspend seccomp for %d: %s. "
 				"Memory read via process_vm_readv; other parasite "
 				"syscalls may still be blocked. If the dump fails "
