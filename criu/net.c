@@ -3477,10 +3477,48 @@ int network_lock_internal(bool restore)
 	return ret;
 }
 
+#if defined(CONFIG_HAS_NFTABLES_LIB_API_0) || defined(CONFIG_HAS_NFTABLES_LIB_API_1)
+static int nftables_table_exists(const char *table)
+{
+	const char *tables;
+	struct nft_ctx *nft;
+	char needle[64];
+	int ret;
+
+	nft = nft_ctx_new(NFT_CTX_DEFAULT);
+	if (!nft)
+		return -1;
+
+	if (nft_ctx_buffer_output(nft) || nft_ctx_buffer_error(nft)) {
+		pr_err("Failed to enable nftables output buffering\n");
+		nft_ctx_free(nft);
+		return -1;
+	}
+
+#if defined(CONFIG_HAS_NFTABLES_LIB_API_0)
+	ret = nft_run_cmd_from_buffer(nft, "list tables", strlen("list tables"));
+#else
+	ret = nft_run_cmd_from_buffer(nft, "list tables");
+#endif
+	if (ret) {
+		pr_err("Unable to list nftables tables\n");
+		nft_ctx_free(nft);
+		return -1;
+	}
+
+	tables = nft_ctx_get_output_buffer(nft);
+	snprintf(needle, sizeof(needle), "table %s\n", table);
+	ret = tables && strstr(tables, needle) ? 1 : 0;
+
+	nft_ctx_free(nft);
+	return ret;
+}
+#endif
+
 int nftables_network_unlock(void)
 {
 #if defined(CONFIG_HAS_NFTABLES_LIB_API_0) || defined(CONFIG_HAS_NFTABLES_LIB_API_1)
-	int ret = 0;
+	int ret = 0, exists;
 	cleanup_file FILE *fp = NULL;
 	struct nft_ctx *nft;
 	char table[32];
@@ -3488,6 +3526,10 @@ int nftables_network_unlock(void)
 
 	if (nftables_get_table(table, sizeof(table)))
 		return -1;
+
+	exists = nftables_table_exists(table);
+	if (exists <= 0)
+		return exists < 0 ? -1 : -ENOENT;
 
 	nft = nft_ctx_new(NFT_CTX_DEFAULT);
 	if (!nft)
@@ -3498,12 +3540,8 @@ int nftables_network_unlock(void)
 		return -1;
 
 	snprintf(buf, sizeof(buf), "delete table %s", table);
-	if (NFT_RUN_CMD(nft, buf)) {
-		if (errno == ENOENT)
-			ret = -ENOENT;
-		else
-			ret = -1;
-	}
+	if (NFT_RUN_CMD(nft, buf))
+		ret = -1;
 
 	nft_ctx_free(nft);
 	return ret;
