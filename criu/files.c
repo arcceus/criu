@@ -497,18 +497,7 @@ static int dump_chrdev(struct fd_parms *p, int lfd, FdinfoEntry *e)
 	return err;
 }
 
-static bool is_cgroup_fd_path(const char *path)
-{
-	const char cgroup_root[] = "/sys/fs/cgroup";
-	size_t len = sizeof(cgroup_root) - 1;
-
-	if (strncmp(path, cgroup_root, len))
-		return false;
-
-	return path[len] == '\0' || path[len] == '/';
-}
-
-static bool cgroup_fd_mount_is_external(struct fd_parms *p)
+static bool cgroup_fd_mount(struct fd_parms *p, struct mount_info **mnt)
 {
 	struct mount_info *mi;
 
@@ -522,7 +511,8 @@ static bool cgroup_fd_mount_is_external(struct fd_parms *p)
 	if (mi->fstype->code != FSTYPE__CGROUP && mi->fstype->code != FSTYPE__CGROUP2)
 		return false;
 
-	return mnt_is_nodev_external(mi);
+	*mnt = mi;
+	return true;
 }
 
 static int dump_one_file(struct pid *pid, int fd, int lfd, struct fd_opts *fdo, struct parasite_ctl *ctl,
@@ -540,10 +530,12 @@ static int dump_one_file(struct pid *pid, int fd, int lfd, struct fd_opts *fdo, 
 
 	if ((opts.unprivileged || in_noninitial_userns()) &&
 	    (S_ISREG(p.stat.st_mode) || S_ISDIR(p.stat.st_mode) || S_ISLNK(p.stat.st_mode))) {
-		if (fill_fdlink(lfd, &p, &link))
-			return -1;
-		link_filled = true;
-		if (is_cgroup_fd_path(link.name + 1) && !cgroup_fd_mount_is_external(&p)) {
+		struct mount_info *cgroup_mnt;
+
+		if (cgroup_fd_mount(&p, &cgroup_mnt) && !mnt_is_nodev_external(cgroup_mnt)) {
+			if (fill_fdlink(lfd, &p, &link))
+				return -1;
+			link_filled = true;
 			pr_err("cannot dump cgroup fd %d path %s without external cgroup mount mapping\n", fd,
 			       link.name + 1);
 			return -1;
