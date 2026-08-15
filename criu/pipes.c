@@ -228,6 +228,16 @@ int restore_pipe_data(int img_type, int pfd, u32 id, struct pipe_data_rst **hash
 		ret = set_pipe_size(pfd, pd->pde->size);
 		if (ret < 0) {
 			if (pipe_resize_denied_in_userns()) {
+				ret = fcntl(pfd, F_GETPIPE_SZ);
+				if (ret < 0) {
+					pr_perror("Can't get default pipe capacity");
+					return -1;
+				}
+				if (pd->pde->bytes > ret) {
+					pr_err("Can't restore %u bytes into pipe %#x with default capacity %#x\n",
+					       pd->pde->bytes, pd->pde->pipe_id, ret);
+					return -1;
+				}
 				pr_warn("Can't restore pipe size %#x for %#x, using default capacity\n",
 					pd->pde->size, pd->pde->pipe_id);
 			} else {
