@@ -2,6 +2,7 @@
 #include <fcntl.h>
 #include <sched.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <grp.h>
 
@@ -52,15 +53,6 @@ int userns_broker_drop_groups(const char *broker_name, const char *op_name)
 					pr_info("%s: setgroups denied, groups already safe\n", broker_name);
 				return 0;
 			}
-
-			if (in_noninitial_userns()) {
-				if (op_name)
-					pr_info("%s %s: tolerate setgroups denial in user namespace\n", broker_name, op_name);
-				else
-					pr_info("%s: tolerate setgroups denial in user namespace\n", broker_name);
-				return 0;
-			}
-
 		}
 		broker_pr_perror(broker_name, op_name, "setgroups");
 		return -1;
@@ -79,6 +71,32 @@ int userns_broker_enter_creds(const char *broker_name, const char *op_name)
 	return 0;
 }
 
+static int userns_broker_same_ns(int ns_fd, const char *op_name)
+{
+	struct stat cur_st, target_st;
+	int cur_fd;
+
+	cur_fd = open("/proc/self/ns/user", O_RDONLY);
+	if (cur_fd < 0) {
+		pr_perror("userns broker %s: open current userns", op_name);
+		return -1;
+	}
+
+	if (fstat(cur_fd, &cur_st)) {
+		pr_perror("userns broker %s: stat current userns", op_name);
+		close(cur_fd);
+		return -1;
+	}
+	close(cur_fd);
+
+	if (fstat(ns_fd, &target_st)) {
+		pr_perror("userns broker %s: stat target userns", op_name);
+		return -1;
+	}
+
+	return cur_st.st_dev == target_st.st_dev && cur_st.st_ino == target_st.st_ino;
+}
+
 int userns_broker_enter(int pid, const char *op_name)
 {
 	int userns_fd;
@@ -93,9 +111,12 @@ int userns_broker_enter(int pid, const char *op_name)
 	}
 
 	if (setns(userns_fd, CLONE_NEWUSER)) {
-		if (errno == EINVAL)
+		int setns_errno = errno;
+
+		if (setns_errno == EINVAL && userns_broker_same_ns(userns_fd, op_name) > 0)
 			pr_info("userns broker %s: already in target userns\n", op_name);
 		else {
+			errno = setns_errno;
 			pr_perror("userns broker %s: setns userns %d", op_name, pid);
 			close(userns_fd);
 			return -1;
