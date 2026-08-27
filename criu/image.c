@@ -696,7 +696,6 @@ static int img_write_magic(struct cr_img *img, int oflags, int type)
 struct openat_args {
 	char path[PATH_MAX];
 	int flags;
-	int err;
 	int mode;
 };
 
@@ -706,10 +705,8 @@ static int userns_openat(void *arg, int dfd, int pid)
 	int ret;
 
 	ret = openat(dfd, pa->path, pa->flags, pa->mode);
-	if (ret < 0) {
-		pa->err = errno;
+	if (ret < 0)
 		return -errno;
-	}
 
 	return ret;
 }
@@ -733,13 +730,12 @@ static int do_open_image(struct cr_img *img, int dfd, int type, unsigned long of
 		 */
 		struct openat_args pa = {
 			.flags = flags,
-			.err = 0,
 			.mode = CR_FD_PERM,
 		};
 		snprintf(pa.path, PATH_MAX, "%s", path);
 		ret = userns_call(userns_openat, UNS_FDOUT, &pa, sizeof(struct openat_args), dfd);
 		if (ret < 0)
-			errno = pa.err ? pa.err : -ret;
+			errno = -ret;
 	} else
 		ret = openat(dfd, path, flags, CR_FD_PERM);
 	if (ret < 0) {
@@ -890,25 +886,30 @@ int open_parent(int dfd, int *pfd)
 	struct stat st;
 
 	*pfd = -1;
-	/* Check if the parent symlink exists */
-	if (fstatat(dfd, CR_PARENT_LINK, &st, AT_SYMLINK_NOFOLLOW) && errno == ENOENT) {
-		pr_debug("No parent images directory provided\n");
-		return 0;
-	}
 
 	if ((root_ns_mask & CLONE_NEWUSER) && opts.mode == CR_RESTORE && userns_join_ns_requested()) {
 		struct openat_args pa = {
 			.flags = O_RDONLY,
-			.err = 0,
 			.mode = 0,
 		};
 
 		snprintf(pa.path, PATH_MAX, "%s", CR_PARENT_LINK);
 		*pfd = userns_call(userns_openat, UNS_FDOUT, &pa, sizeof(struct openat_args), dfd);
-		if (*pfd < 0)
-			errno = pa.err ? pa.err : -*pfd;
-	} else
+		if (*pfd < 0) {
+			errno = -*pfd;
+			if (errno == ENOENT) {
+				pr_debug("No parent images directory provided\n");
+				return 0;
+			}
+		}
+	} else {
+		/* Check if the parent symlink exists. */
+		if (fstatat(dfd, CR_PARENT_LINK, &st, AT_SYMLINK_NOFOLLOW) && errno == ENOENT) {
+			pr_debug("No parent images directory provided\n");
+			return 0;
+		}
 		*pfd = openat(dfd, CR_PARENT_LINK, O_RDONLY);
+	}
 	if (*pfd < 0) {
 		pr_perror("Can't open parent path");
 		return -1;
