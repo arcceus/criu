@@ -1025,6 +1025,7 @@ static int restore_one_task(int pid, CoreEntry *core)
 struct cr_clone_arg {
 	struct pstree_item *item;
 	unsigned long clone_flags;
+	int joined_userns_pipe_fd;
 
 	CoreEntry *core;
 };
@@ -1037,7 +1038,7 @@ static void maybe_clone_parent(struct pstree_item *item, struct cr_clone_arg *ca
 	 * off of 3.11, this condition can be simplified to just test the
 	 * options and not have the pdeath_sig test.
 	 */
-	if (opts.restore_sibling && !userns_join_ns_requested()) {
+	if (opts.restore_sibling) {
 		/*
 		 * This means we're called from lib's criu_restore_child().
 		 * In that case create the root task as the child one to+
@@ -1097,11 +1098,215 @@ static int set_next_pid(void *arg)
 	return 0;
 }
 
+struct joined_userns_clone_arg {
+	struct cr_clone_arg *ca;
+	unsigned long clone_flags;
+	pid_t requested_pid;
+	bool set_next_pid;
+	int pid_pipe_fd;
+	sigset_t child_sigmask;
+};
+
+static int write_pid_to_pipe(int fd, pid_t pid)
+{
+	const char *buf = (const char *)&pid;
+	size_t left = sizeof(pid);
+
+	while (left) {
+		ssize_t n = write(fd, buf, left);
+
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			return -1;
+		}
+		if (!n) {
+			errno = EPIPE;
+			return -1;
+		}
+
+		buf += n;
+		left -= n;
+	}
+
+	return 0;
+}
+
+static int read_pid_from_pipe(int fd, pid_t *pid)
+{
+	char *buf = (char *)pid;
+	size_t left = sizeof(*pid);
+
+	while (left) {
+		ssize_t n = read(fd, buf, left);
+
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			return -1;
+		}
+		if (!n) {
+			errno = EPIPE;
+			return -1;
+		}
+
+		buf += n;
+		left -= n;
+	}
+
+	return 0;
+}
+
+static int clone_root_in_joined_userns(void *arg)
+{
+	struct joined_userns_clone_arg *uca = arg;
+	unsigned long clone_flags = uca->clone_flags | CLONE_PARENT;
+	pid_t pid;
+
+	/*
+	 * The helper has already consumed a PID in the namespace selected for
+	 * children. Program the requested PID now, before joining the user
+	 * namespace can drop capabilities in the PID namespace's owner.
+	 */
+	if (uca->set_next_pid && set_next_pid(&uca->requested_pid)) {
+		pr_err("Setting PID in joined user namespace helper failed\n");
+		close(uca->pid_pipe_fd);
+		return 1;
+	}
+
+	if (join_user_namespace()) {
+		pr_err("Unable to join the target user namespace\n");
+		close(uca->pid_pipe_fd);
+		return 1;
+	}
+
+	/* The restored root must not inherit the helper's temporary signal mask. */
+	if (sigprocmask(SIG_SETMASK, &uca->child_sigmask, NULL)) {
+		pr_perror("Unable to restore signal mask in userns helper");
+		close_join_user_namespace();
+		close(uca->pid_pipe_fd);
+		return 1;
+	}
+	uca->ca->joined_userns_pipe_fd = uca->pid_pipe_fd;
+
+	/*
+	 * CLONE_PARENT makes the restored root a child of the CRIU coordinator,
+	 * while this short-lived helper is the process that owns the namespace
+	 * context used by clone().
+	 */
+	if (kdat.has_clone3_set_tid)
+		pid = clone3_with_pid_noasan(restore_task_with_children, uca->ca, clone_flags, SIGCHLD,
+					     uca->requested_pid);
+	else {
+		close_pid_proc();
+		pid = clone_noasan(restore_task_with_children, clone_flags | SIGCHLD, uca->ca);
+	}
+
+	if (pid < 0) {
+		pr_perror("Unable to clone the root task from the target user namespace");
+		close_join_user_namespace();
+		close(uca->pid_pipe_fd);
+		return 1;
+	}
+
+	/* The helper has a private address space, so report the PID over the pipe. */
+	if (write_pid_to_pipe(uca->pid_pipe_fd, pid)) {
+		pr_perror("Unable to report the restored root PID");
+		close_join_user_namespace();
+		close(uca->pid_pipe_fd);
+		return 1;
+	}
+	/* The restored root inherited the descriptor and closes it on entry. */
+	close(uca->pid_pipe_fd);
+	close_join_user_namespace();
+	return 0;
+}
+
+static int fork_root_in_joined_userns(struct cr_clone_arg *ca, unsigned long clone_flags, pid_t pid)
+{
+	struct joined_userns_clone_arg uca = {
+		.ca = ca,
+		.clone_flags = clone_flags,
+		.requested_pid = pid,
+		.set_next_pid = !kdat.has_clone3_set_tid && !(clone_flags & CLONE_NEWPID),
+		.pid_pipe_fd = -1,
+	};
+	int pid_pipe[2] = {-1, -1};
+	pid_t child_pid;
+	sigset_t blockmask;
+	unsigned long helper_flags = CLONE_VFORK | SIGCHLD;
+	int status = 0, ret = -1;
+	pid_t helper = -1;
+
+	sigemptyset(&blockmask);
+	sigaddset(&blockmask, SIGCHLD);
+	if (sigprocmask(SIG_BLOCK, &blockmask, &uca.child_sigmask)) {
+		pr_perror("Unable to block SIGCHLD for userns helper");
+		return -1;
+	}
+	if (pipe(pid_pipe)) {
+		pr_perror("Unable to create userns restore PID pipe");
+		goto out;
+	}
+	uca.pid_pipe_fd = pid_pipe[1];
+
+	/*
+	 * CLONE_VFORK keeps the coordinator stopped until the helper has created
+	 * and reported the restored root. The helper has a private address space;
+	 * this preserves the libc rseq registration inherited by the restored root.
+	 */
+	helper = clone_noasan(clone_root_in_joined_userns, helper_flags, &uca);
+	if (helper < 0) {
+		pr_perror("Unable to create userns restore helper");
+		goto out;
+	}
+	close(pid_pipe[1]);
+	pid_pipe[1] = -1;
+
+	if (read_pid_from_pipe(pid_pipe[0], &child_pid)) {
+		pr_perror("Userns restore helper did not report the root task PID");
+		goto out;
+	}
+	close(pid_pipe[0]);
+	pid_pipe[0] = -1;
+	if (child_pid <= 0) {
+		pr_err("Userns restore helper reported invalid root task PID %d\n", child_pid);
+		errno = EINVAL;
+		goto out;
+	}
+
+	if (waitpid(helper, &status, 0) != helper) {
+		pr_perror("Unable to reap userns restore helper");
+		goto out;
+	}
+	helper = -1;
+	if (!WIFEXITED(status) || WEXITSTATUS(status)) {
+		pr_err("Userns restore helper failed (status=%d)\n", status);
+		goto out;
+	}
+
+	ret = child_pid;
+out:
+	if (helper > 0)
+		waitpid(helper, &status, 0);
+	if (pid_pipe[0] >= 0)
+		close(pid_pipe[0]);
+	if (pid_pipe[1] >= 0)
+		close(pid_pipe[1]);
+	if (sigprocmask(SIG_SETMASK, &uca.child_sigmask, NULL)) {
+		pr_perror("Unable to restore SIGCHLD mask after userns helper");
+		ret = -1;
+	}
+	return ret;
+}
+
 static inline int fork_with_pid(struct pstree_item *item)
 {
 	struct cr_clone_arg ca;
 	struct ns_id *pid_ns = NULL;
+	unsigned long clone_flags;
 	bool external_pidns = false;
+	bool joined_userns_root;
 	int ret = -1;
 	pid_t pid = vpid(item);
 
@@ -1188,32 +1393,21 @@ static inline int fork_with_pid(struct pstree_item *item)
 
 	ca.item = item;
 	ca.clone_flags = rsti(item)->clone_flags;
+	ca.joined_userns_pipe_fd = -1;
 
 	BUG_ON(ca.clone_flags & CLONE_VM);
 
 	pr_info("Forking task with %d pid (flags 0x%lx)\n", pid, ca.clone_flags);
-
-	if (!item->parent && userns_join_ns_requested()) {
-		if (join_user_namespace()) {
-			pr_perror("Join user namespace before root task clone failed");
-			return -1;
-		}
-		/*
-		 * Switching credentials while joining a user namespace clears
-		 * dumpability. Keep it enabled until the restorer puts the final
-		 * dumpable value back; otherwise the master can't inspect /proc or
-		 * ptrace the restored init during finalization.
-		 */
-		if (prctl(PR_SET_DUMPABLE, 1, 0)) {
-			pr_perror("Unable to set PR_SET_DUMPABLE after joining user namespace");
-			return -1;
-		}
+	joined_userns_root = !item->parent && userns_join_ns_requested();
+	if (joined_userns_root && external_pidns) {
+		pr_err("Joining a user namespace with an external PID namespace is not supported\n");
+		return -1;
 	}
 
 	if (!(ca.clone_flags & CLONE_NEWPID)) {
 		lock_last_pid();
 
-		if (!kdat.has_clone3_set_tid) {
+		if (!kdat.has_clone3_set_tid && !joined_userns_root) {
 			if (external_pidns) {
 				/*
 				 * Restoring into another namespace requires a helper
@@ -1239,10 +1433,12 @@ static inline int fork_with_pid(struct pstree_item *item)
 		}
 	}
 
-	if (kdat.has_clone3_set_tid) {
+	clone_flags = ca.clone_flags & ~(CLONE_NEWNET | CLONE_NEWCGROUP | CLONE_NEWTIME);
+	if (joined_userns_root) {
+		ret = fork_root_in_joined_userns(&ca, clone_flags, pid);
+	} else if (kdat.has_clone3_set_tid) {
 		ret = clone3_with_pid_noasan(restore_task_with_children, &ca,
-					     (ca.clone_flags & ~(CLONE_NEWNET | CLONE_NEWCGROUP | CLONE_NEWTIME)),
-					     SIGCHLD, pid);
+					     clone_flags, SIGCHLD, pid);
 	} else {
 		/*
 		 * Some kernel modules, such as network packet generator
@@ -1257,8 +1453,7 @@ static inline int fork_with_pid(struct pstree_item *item)
 		 * move_in_cgroup(), so drop this flag here as well.
 		 */
 		close_pid_proc();
-		ret = clone_noasan(restore_task_with_children,
-				   (ca.clone_flags & ~(CLONE_NEWNET | CLONE_NEWCGROUP | CLONE_NEWTIME)) | SIGCHLD, &ca);
+		ret = clone_noasan(restore_task_with_children, clone_flags | SIGCHLD, &ca);
 	}
 
 	if (ret < 0) {
@@ -1547,6 +1742,11 @@ static int __restore_task_with_children(void *_arg)
 	pid_t pid;
 	int ret;
 
+	if (ca->joined_userns_pipe_fd >= 0) {
+		close(ca->joined_userns_pipe_fd);
+		ca->joined_userns_pipe_fd = -1;
+	}
+
 	current = ca->item;
 
 	if (current != root_item) {
@@ -1637,6 +1837,10 @@ static int __restore_task_with_children(void *_arg)
 	if (current->parent == NULL) {
 		if (join_namespaces()) {
 			pr_perror("Join namespaces failed");
+			goto err;
+		}
+		if (userns_join_ns_requested() && prctl(PR_SET_DUMPABLE, 1, 0)) {
+			pr_perror("Unable to set PR_SET_DUMPABLE after joining user namespace");
 			goto err;
 		}
 
@@ -2041,12 +2245,8 @@ static void restore_origin_ns_hook(void)
 		return;
 
 	/* not critical: it does not affect CT in any way */
-	if (prepare_loginuid(saved_loginuid) < 0) {
-		if (userns_join_ns_requested())
-			pr_warn("Restore original /proc/self/loginuid failed in joined userns\n");
-		else
-			pr_err("Restore original /proc/self/loginuid failed\n");
-	}
+	if (prepare_loginuid(saved_loginuid) < 0)
+		pr_err("Restore original /proc/self/loginuid failed\n");
 }
 
 static int write_restored_pid(void)
@@ -2191,7 +2391,7 @@ static int restore_root_task(struct pstree_item *init)
 		goto out_kill;
 
 	if (root_ns_mask & CLONE_NEWNS) {
-		mnt_ns_fd = open_proc(userns_join_ns_requested() ? PROC_SELF : init->pid->real, "ns/mnt");
+		mnt_ns_fd = open_proc(init->pid->real, "ns/mnt");
 		if (mnt_ns_fd < 0)
 			goto out_kill;
 	}

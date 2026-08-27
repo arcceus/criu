@@ -195,6 +195,7 @@ extern void free_userns_data(void);
 extern int join_ns_add(const char *type, char *ns_file, char *extra_opts);
 extern int check_namespace_opts(void);
 extern int join_user_namespace(void);
+extern void close_join_user_namespace(void);
 extern int join_namespaces(void);
 extern int userns_join_ns_requested(void);
 
