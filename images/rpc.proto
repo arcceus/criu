@@ -170,6 +170,8 @@ message criu_opts {
 	/* Plugin-owned namespaced options in PLUGIN.NAME[=VALUE] form. */
 	repeated string			plugin_options		= 77;
 	optional bool			stream			= 78;
+	optional bytes			seccomp_bpf		= 79;
+	optional uint32			seccomp_bpf_flags	= 80;
 /*	optional bool			check_mounts		= 128;	*/
 }
 
